@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1792260601452,
+      "tag": "0000_free_puma",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792261816563,
+      "tag": "0001_sudden_madame_hydra",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792262551231,
+      "tag": "0002_legal_avengers",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792263067911,
+      "tag": "0003_youthful_praxagora",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792263139166,
+      "tag": "0004_clever_vulture",
+      "breakpoints": true
+    }
+  ]
+}

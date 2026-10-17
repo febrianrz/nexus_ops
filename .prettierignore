@@ -1,0 +1,6 @@
+node_modules
+.next
+.next-build
+.data
+package-lock.json
+db/migrations/meta

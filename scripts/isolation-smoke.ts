@@ -1,0 +1,211 @@
+import { loadEnvConfig } from '@next/env';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import postgres from 'postgres';
+loadEnvConfig(process.cwd());
+const base = process.env.NEXUS_TEST_URL ?? 'http://localhost:3002';
+const sql = postgres(process.env.DATABASE_URL!, { max: 1 });
+const accounts: { id: string; actorId: string; cookie: string }[] = [];
+async function request(path: string, method = 'GET', body?: unknown, cookie?: string) {
+  return fetch(base + path, {
+    method,
+    headers: { origin: base, 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+async function register() {
+  const password = randomBytes(24).toString('base64url');
+  const response = await request('/api/auth/register', 'POST', {
+    name: 'Isolation QA',
+    email: `isolation-${randomBytes(8).toString('hex')}@example.test`,
+    password,
+    confirm_password: password,
+  });
+  const data = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(data));
+  const account = { ...data.user, cookie: response.headers.get('set-cookie')!.split(';')[0] };
+  accounts.push(account);
+  return account;
+}
+async function main() {
+  try {
+    const a = await register();
+    const response = await request('/api/v1/workspace', 'GET', undefined, a.cookie);
+    assert.equal(response.status, 200);
+    const workspace = await response.json();
+    console.log(
+      `Fresh account: tasks=${workspace.tasks.length}, events=${workspace.events.length}, agents=${workspace.actors.filter((actor: { type: string }) => actor.type === 'AGENT').length}`,
+    );
+    assert.equal(workspace.tasks.length, 0, 'A newly registered account must have zero tasks');
+    assert.equal(workspace.events.length, 0, 'A newly registered account must have zero events');
+    assert.equal(
+      workspace.actors.filter((actor: { type: string }) => actor.type === 'AGENT').length,
+      0,
+      'A newly registered account must have zero agents',
+    );
+    console.log('PASS fresh registration is empty');
+    const b = await register();
+    async function agent(cookie: string, handle: string) {
+      const response = await request(
+        '/api/v1/actors/agents',
+        'POST',
+        { handle, display_name: handle.slice(1), capabilities: ['testing'] },
+        cookie,
+      );
+      assert.equal(response.status, 200);
+      return response.json();
+    }
+    const coderA = await agent(a.cookie, '@bot-coder');
+    const qaA = await agent(a.cookie, '@bot-qa');
+    const coderB = await agent(b.cookie, '@bot-coder');
+    assert.notEqual(coderA.actor.id, coderB.actor.id);
+    console.log('PASS identical agent handles are independently registered per account');
+    const sourceRef = `isolation-${randomBytes(6).toString('hex')}`;
+    const payload = { title: 'Owned isolation task', source_type: 'MANUAL', source_ref: sourceRef };
+    const createA = await request('/api/v1/ingest', 'POST', payload, a.cookie);
+    assert.equal(createA.status, 200);
+    const taskA = (await createA.json()).task;
+    assert.equal(taskA.assignee_id, null, 'Tasks without a triage agent must be unassigned');
+    const emptyB = await (await request('/api/v1/workspace', 'GET', undefined, b.cookie)).json();
+    assert.equal(emptyB.tasks.length, 0);
+    assert.equal(emptyB.events.length, 0);
+    assert.equal(
+      emptyB.actors.some(
+        (actor: { id: string }) => actor.id === coderA.actor.id || actor.id === a.actorId,
+      ),
+      false,
+    );
+    console.log('PASS account B cannot see account A tasks, events or identities');
+    const spoofed = await fetch(base + '/api/v1/workspace', {
+      headers: { cookie: b.cookie, 'X-Nexus-Owner': a.id },
+    });
+    const spoofedData = await spoofed.json();
+    assert.equal(spoofed.status, 200);
+    assert.equal(spoofedData.tasks.length, 0);
+    assert.equal(
+      spoofedData.actors.some((actor: { id: string }) => actor.id === a.actorId),
+      false,
+    );
+    console.log('PASS cookie sessions cannot switch owners using a forged header');
+
+    const createB = await request('/api/v1/ingest', 'POST', payload, b.cookie);
+    assert.equal(createB.status, 200);
+    const taskB = (await createB.json()).task;
+    assert.notEqual(taskA.id, taskB.id);
+    const repeatedA = await (await request('/api/v1/ingest', 'POST', payload, a.cookie)).json();
+    assert.equal(repeatedA.duplicate, true);
+    assert.equal(repeatedA.task.id, taskA.id);
+    console.log('PASS source deduplication and task IDs work independently across accounts');
+    for (const [suffix, method, body] of [
+      ['/events', 'POST', { message: 'Access probe' }],
+      ['/delegate', 'POST', { target_handle: '@bot-coder' }],
+      ['/telemetry', 'PATCH', { confidence_score: 0.5 }],
+      ['', 'PATCH', { action: 'queue' }],
+    ] as const) {
+      const denied = await request(`/api/v1/tasks/${taskA.id}${suffix}`, method, body, b.cookie);
+      assert.equal(denied.status, 404, `${method} ${suffix} must not access another account`);
+    }
+    assert.equal(
+      (await request(`/api/v1/actors/${coderA.actor.id}`, 'PATCH', { status: 'OFFLINE' }, b.cookie))
+        .status,
+      404,
+    );
+    assert.equal(
+      (
+        await request(
+          '/api/v1/actors/agents',
+          'POST',
+          {
+            handle: '@bot-foreign-child',
+            display_name: 'Foreign child',
+            parent_agent_id: qaA.actor.id,
+          },
+          b.cookie,
+        )
+      ).status,
+      404,
+    );
+    assert.equal(
+      (
+        await request(
+          `/api/v1/tasks/${taskB.id}/delegate`,
+          'POST',
+          { target_handle: '@bot-qa' },
+          b.cookie,
+        )
+      ).status,
+      404,
+    );
+    console.log(
+      'PASS foreign task mutations, actor updates, parent references and delegation are rejected',
+    );
+    const delegated = await request(
+      `/api/v1/tasks/${taskA.id}/delegate`,
+      'POST',
+      { target_handle: '@bot-coder' },
+      a.cookie,
+    );
+    assert.equal(delegated.status, 200);
+    const agentResponse = await fetch(base + '/api/v1/workspace', {
+      headers: { authorization: `Bearer ${coderA.token}` },
+    });
+    assert.equal(agentResponse.status, 200);
+    const agentWorkspace = await agentResponse.json();
+    assert.deepEqual(
+      agentWorkspace.tasks.map((task: { id: string }) => task.id),
+      [taskA.id],
+    );
+    assert.equal(
+      agentWorkspace.actors.some((actor: { id: string }) => actor.id === coderB.actor.id),
+      false,
+    );
+    const crossAgent = await fetch(base + `/api/v1/tasks/${taskA.id}/telemetry`, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${coderB.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ confidence_score: 0.9 }),
+    });
+    assert.equal(crossAgent.status, 404);
+    console.log('PASS agent tokens remain scoped to their owner and assigned task');
+    const comment = await request(
+      `/api/v1/tasks/${taskA.id}/events`,
+      'POST',
+      { message: 'Owner comment' },
+      a.cookie,
+    );
+    assert.equal(comment.status, 200);
+    const finalA = await (await request('/api/v1/workspace', 'GET', undefined, a.cookie)).json();
+    const finalB = await (await request('/api/v1/workspace', 'GET', undefined, b.cookie)).json();
+    assert.equal(finalA.tasks.length, 1);
+    assert.equal(finalB.tasks.length, 1);
+    assert.ok(
+      finalA.events.some(
+        (event: { human_message: string }) => event.human_message === 'Owner comment',
+      ),
+    );
+    assert.equal(
+      finalB.events.some(
+        (event: { human_message: string }) => event.human_message === 'Owner comment',
+      ),
+      false,
+    );
+    const [counts] =
+      await sql`SELECT (SELECT count(*) FROM tasks WHERE owner_user_id = ${a.id}) AS tasks, (SELECT count(*) FROM actors WHERE owner_user_id = ${a.id}) AS actors, (SELECT count(*) FROM task_events WHERE owner_user_id = ${a.id}) AS events`;
+    assert.equal(Number(counts.tasks), finalA.tasks.length);
+    assert.equal(Number(counts.actors), finalA.actors.length);
+    assert.equal(Number(counts.events), finalA.events.length);
+    console.log('PASS dashboard counts match persisted PostgreSQL records for the owner');
+  } finally {
+    for (const account of accounts) {
+      await sql`DELETE FROM workspaces WHERE created_by = ${account.id}`;
+      await sql`DELETE FROM users WHERE id = ${account.id}`;
+      await sql`DELETE FROM actors WHERE id = ${account.actorId}`;
+    }
+    await sql.end();
+  }
+}
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error instanceof Error ? error.message : 'Isolation failed');
+    process.exit(1);
+  });
