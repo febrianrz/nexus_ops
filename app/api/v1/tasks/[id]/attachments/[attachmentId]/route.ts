@@ -10,8 +10,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string;
   return route(req, async () => {
     const { id, attachmentId } = await ctx.params;
     await attachmentTask(req, id);
-    const [file] = await database().select({ content: taskAttachments.content, filename: taskAttachments.filename, size: taskAttachments.size }).from(taskAttachments).where(and(eq(taskAttachments.id, attachmentId), eq(taskAttachments.task_id, id))).limit(1);
+    const [file] = await database().select({ content: taskAttachments.content, object_url: taskAttachments.object_url, filename: taskAttachments.filename, size: taskAttachments.size }).from(taskAttachments).where(and(eq(taskAttachments.id, attachmentId), eq(taskAttachments.task_id, id))).limit(1);
     if (!file) throw new ProtocolError('Attachment not found', 404);
+    if (file.object_url) return NextResponse.redirect(file.object_url);
     return new NextResponse(new Uint8Array(file.content), { headers: {
       'Content-Type': 'application/octet-stream',
       'Content-Disposition': `attachment; filename="attachment"; filename*=UTF-8''${encodeURIComponent(file.filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`,

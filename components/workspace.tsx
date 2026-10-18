@@ -34,6 +34,8 @@ import {
   LogOut,
   LoaderCircle,
   Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
   Moon,
   Plus,
   ListPlus,
@@ -70,6 +72,7 @@ import ProjectManager from './project-manager';
 import AgentSettings from './agent-settings';
 import { AssigneePicker } from './assignee-picker';
 import DeveloperSettings from './developer-settings';
+import ProfileSettings from './profile-settings';
 import { TaskPlanningCell } from './task-planning';
 import { Notifications } from './notifications';
 import { PriorityPicker } from './priority-picker';
@@ -97,6 +100,7 @@ type ModalKind =
   | 'members-settings'
   | 'agents'
   | 'developer'
+  | 'profile'
   | 'workspaces'
   | 'projects'
   | null;
@@ -121,7 +125,6 @@ function renderProjectTaskTree(
             title={task.title}
             aria-expanded={children.length ? expanded : undefined}
           >
-            <span className="mono">{task.id}</span>
             <span>{task.title}</span>
           </button>
           {children.length > 0 && (
@@ -243,6 +246,9 @@ export default function Workspace({ user }: { user: SessionUser }) {
   const [modal, setModal] = useState<ModalKind>(null);
   const [layout, setLayout] = useState('board');
   const [sidebar, setSidebar] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(216);
+  const resizingSidebar = useRef(false);
   const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
   const [expandedProjectTaskIds, setExpandedProjectTaskIds] = useState<string[]>([]);
@@ -261,6 +267,26 @@ export default function Workspace({ user }: { user: SessionUser }) {
   const [theme, setTheme] = useState('dark');
   const [error, setError] = useState('');
   const [loggingOut, setLoggingOut] = useState(false);
+  useEffect(() => {
+    const collapsed = localStorage.getItem('nexus-sidebar-collapsed');
+    const width = Number(localStorage.getItem('nexus-sidebar-width'));
+    if (collapsed === 'true') setSidebarCollapsed(true);
+    if (Number.isFinite(width) && width >= 180 && width <= 360) setSidebarWidth(width);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem('nexus-sidebar-collapsed', String(sidebarCollapsed));
+    localStorage.setItem('nexus-sidebar-width', String(sidebarWidth));
+  }, [sidebarCollapsed, sidebarWidth]);
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      if (!resizingSidebar.current) return;
+      setSidebarWidth(Math.max(180, Math.min(360, event.clientX)));
+    };
+    const stop = () => { resizingSidebar.current = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); };
+  }, []);
   async function selectWorkspace(id: string) {
     setSelected(null);
     setQuery('');
@@ -275,6 +301,10 @@ export default function Workspace({ user }: { user: SessionUser }) {
   const currentActor = actors.find((actor) => actor.id === user.actorId);
   const project = projects.find((item) => item.id === selectedProjectId) ?? projects[0];
   const tasks = allTasks.filter((task) => task.project_id === project?.id);
+  const summaryTasks = allTasks;
+  const globalCompletion = summaryTasks.length
+    ? Math.round((summaryTasks.filter((task) => task.state === 'DONE').length / summaryTasks.length) * 100)
+    : 0;
   const projectTaskIds = new Set(tasks.map((task) => task.id));
   const events = allEvents.filter((event) => projectTaskIds.has(event.task_id));
   async function logout() {
@@ -427,6 +457,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
       className={`nav-item ${view === id ? 'active' : ''}`}
       onClick={() => navigate(id)}
       key={id}
+      title={sidebarCollapsed ? label : undefined}
     >
       <Icon size={17} />
       <span>{label}</span>
@@ -436,7 +467,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
   );
   return (
     <MotionConfig reducedMotion="user">
-      <div className="app-shell">
+      <div className="app-shell" style={{ '--sidebar-width': `${sidebarCollapsed ? 68 : sidebarWidth}px` } as CSSProperties}>
         <Toaster
           position="bottom-right"
           theme={theme === 'dark' ? 'dark' : 'light'}
@@ -445,7 +476,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
           toastOptions={{ style: { fontFamily: 'inherit' } }}
         />
         {sidebar && <div className="sidebar-scrim" onClick={() => setSidebar(false)} />}
-        <aside className={`sidebar ${sidebar ? 'mobile-open' : ''}`}>
+        <aside className={`sidebar ${sidebar ? 'mobile-open' : ''} ${sidebarCollapsed ? 'is-collapsed' : ''}`}>
           <a className="brand" href="/" aria-label="NexusOps home">
             <NexusLogo />
             <span>
@@ -453,7 +484,10 @@ export default function Workspace({ user }: { user: SessionUser }) {
             </span>
             <span className="brand-dot" />
           </a>
-          <button className="workspace-switcher" onClick={() => setModal('workspaces')}>
+          <button className="sidebar-collapse-button" aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}>
+            {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}<span>{sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}</span>
+          </button>
+          <button className="workspace-switcher" title={sidebarCollapsed ? 'Choose workspace' : undefined} onClick={() => setModal('workspaces')}>
             <span className="workspace-symbol">N</span>
             <span>
               <strong>{team.current?.name ?? 'Choose workspace'}</strong>
@@ -466,7 +500,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
             </span>
             <ChevronsUpDown size={13} />
           </button>
-          <button className="sidebar-search" onClick={() => setCommandOpen(true)}>
+          <button className="sidebar-search" title={sidebarCollapsed ? 'Quick search' : undefined} onClick={() => setCommandOpen(true)}>
             <Search size={15} />
             <span>Quick search</span>
             <kbd>⌘ K</kbd>
@@ -574,6 +608,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
               </div>
             )}
           </div>
+          {!sidebarCollapsed && <div className="sidebar-resize-handle" role="separator" aria-label="Resize sidebar" onPointerDown={(event) => { event.preventDefault(); resizingSidebar.current = true; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; }} />}
         </aside>
         <main className={`main-workspace ${view === 'project' ? 'project-view' : ''}`}>
           <header className="topbar">
@@ -646,6 +681,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                     </button>
                     <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('agents'); }}><Bot size={15} /><span>AI agents</span></button>
                     <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('developer'); }}><KeyRound size={15} /><span>Developer</span></button>
+                    <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('profile'); }}><Users size={15} /><span>Profile</span></button>
                     <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('help'); }}><HelpCircle size={15} /><span>Help &amp; shortcuts</span></button>
                     <div className="profile-menu-divider" />
                     <button role="menuitem" onClick={() => void logout()} disabled={loggingOut}>
@@ -683,7 +719,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                           ? 'Bring your work together.'
                           : view === 'my-tasks'
                             ? 'Your judgment. Their momentum.'
-                            : 'Projects that keep work moving.'}
+                          : 'Workspace overview.'}
                   </h1>
                   <span className="workspace-badge">
                     <span />
@@ -701,7 +737,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                         ? 'Turn issues, pull requests, and support tickets into coordinated action.'
                         : view === 'my-tasks'
                           ? 'A little human oversight goes a long way. Here’s what needs your attention.'
-                          : 'Your projects. Your tasks. One workspace.'}
+                          : 'A global summary of every project and task.'}
                 </p>
               </div>
               <Button
@@ -843,21 +879,21 @@ export default function Workspace({ user }: { user: SessionUser }) {
                       Tasks in motion
                     </div>
                     <div className="stat-value">
-                      {String(tasks.filter((t) => t.state !== 'DONE').length).padStart(2, '0')}
+                      {String(summaryTasks.filter((t) => t.state !== 'DONE').length).padStart(2, '0')}
                       <span className="stat-change">
                         <span className="little-dot" />
-                        In this project
+                        Across all projects
                       </span>
                     </div>
                     <div className="stat-track">
                       {['TRIAGE', 'QUEUED', 'EXECUTING', 'WAITING_HUMAN', 'DONE']
-                        .filter((state) => tasks.some((task) => task.state === state))
+                        .filter((state) => summaryTasks.some((task) => task.state === state))
                         .map((s) => (
                           <span
                             key={s}
                             className={`track-${s.toLowerCase()}`}
                             style={{
-                              flex: tasks.filter((t) => t.state === s).length,
+                              flex: summaryTasks.filter((t) => t.state === s).length,
                             }}
                           />
                         ))}
@@ -870,7 +906,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                     </div>
                     <div className="stat-value">
                       {String(
-                        tasks.filter((task) => task.is_agent_task && task.state !== 'DONE').length,
+                        summaryTasks.filter((task) => task.is_agent_task && task.state !== 'DONE').length,
                       ).padStart(2, '0')}
                     </div>
                     <p>
@@ -890,7 +926,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                       Needs your eyes
                     </div>
                     <div className="stat-value amber-text">
-                      {String(review.length).padStart(2, '0')}
+                      {String(summaryTasks.filter((task) => task.state === 'WAITING_HUMAN' || task.state === 'BLOCKED').length).padStart(2, '0')}
                       <span className="approval-stat-label">
                         Human review
                         <ArrowUpRight size={12} />
@@ -899,19 +935,35 @@ export default function Workspace({ user }: { user: SessionUser }) {
                     <p>A final check. A confident ship.</p>
                   </button>
                   <div className="stat guardrail-stat">
-                    <div className="stat-label">
-                      <ShieldCheck size={15} />
-                      Clear project ownership
-                    </div>
-                    <div className="guardrail-title">
-                      <span className="guardrail-icon">
-                        <ShieldCheck size={20} />
-                      </span>
-                      <strong>You’re in control.</strong>
-                    </div>
-                    <p>Tasks stay scoped to the selected project.</p>
+                    <div className="stat-label"><FolderKanban size={15} /> Projects</div>
+                    <div className="guardrail-title"><span className="guardrail-icon"><FolderKanban size={20} /></span><strong>{projects.length}</strong></div>
+                    <p>Projects in this workspace.</p>
                   </div>
                 </section>
+                {view === 'overview' && (
+                  <section className="overview-projects" aria-label="Project summary">
+                    <div className="overview-projects-heading">
+                      <div><h2>Projects</h2><p>Completion across every project.</p></div>
+                      <strong>{globalCompletion}% overall</strong>
+                    </div>
+                    <div className="overview-project-grid">
+                      {projects.map((item) => {
+                        const projectTasks = summaryTasks.filter((task) => task.project_id === item.id);
+                        const completed = projectTasks.filter((task) => task.state === 'DONE').length;
+                        const completion = projectTasks.length ? Math.round((completed / projectTasks.length) * 100) : 0;
+                        return (
+                          <button className="overview-project-card" key={item.id} onClick={() => { selectProject(item.id); setView('project'); }}>
+                            <div className="overview-project-card-top"><span className="project-pulse-mark">{item.name.slice(0, 1).toUpperCase()}</span><span>{item.name}</span><strong>{completion}%</strong></div>
+                            <div className="overview-project-progress"><span style={{ width: `${completion}%` }} /></div>
+                            <div className="overview-project-meta"><span>{projectTasks.length} task{projectTasks.length === 1 ? '' : 's'}</span><span>{completed} done</span></div>
+                          </button>
+                        );
+                      })}
+                      {!projects.length && <EmptyState title="No projects yet" description="Create a project to see its summary here." />}
+                    </div>
+                  </section>
+                )}
+                {view !== 'overview' && <>
                 <div className="workspace-tabs">
                   <div>
                     <button
@@ -1266,6 +1318,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                     </span>
                   </div>
                 </div>
+                </>}
               </>
             )}
             {view === 'activity' && (
@@ -1505,6 +1558,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
           )}
           {modal === 'agents' && <AgentSettings key={team.current?.id} onClose={() => setModal(null)} />}
           {modal === 'developer' && <DeveloperSettings key={team.current?.id} onClose={() => setModal(null)} />}
+          {modal === 'profile' && <ProfileSettings onClose={() => setModal(null)} />}
           {modal === 'members-settings' && (
             <Modal
               title="Members & settings"

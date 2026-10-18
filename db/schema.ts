@@ -237,6 +237,7 @@ export const taskAttachments = pgTable('task_attachments', {
   mime_type: text().notNull(),
   size: integer().notNull(),
   content: attachmentBytes().notNull(),
+  object_url: text(),
   created_at: timestamp({ mode: 'string', withTimezone: true }).notNull().defaultNow(),
 }, (table) => [index('task_attachment_task_idx').on(table.task_id), check('attachment_size_bounds', sql`${table.size} >= 0 AND ${table.size} <= 10485760`)]);
 

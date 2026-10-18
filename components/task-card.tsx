@@ -61,10 +61,6 @@ export default function TaskCard({
         aria-label={`Open ${task.id}: ${task.title}`}
       >
         <div className="card-top">
-          <span className="task-id">
-            <Source size={13} />
-            {task.id}
-          </span>
           <span className="card-top-right">
             <PriorityIcon priority={task.priority} />
             <MoreHorizontal size={16} />

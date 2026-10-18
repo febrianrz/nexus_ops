@@ -15,6 +15,8 @@ import {
   GitBranch,
   Link2,
   MessageSquare,
+  Maximize2,
+  Minimize2,
   Plus,
   Send,
   ShieldAlert,
@@ -50,6 +52,7 @@ export default function Inspector({
   const [expanded, setExpanded] = useState<string[]>(['context']);
   const [copy, setCopy] = useState(false);
   const [showSubtask, setShowSubtask] = useState(false);
+  const [wide, setWide] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const panel = useRef<HTMLElement>(null);
   const mention = message.match(/@([\w-]*)$/);
@@ -108,7 +111,7 @@ export default function Inspector({
       <motion.aside
         ref={panel}
         tabIndex={-1}
-        className="inspector"
+        className={`inspector compact-inspector${wide ? ' inspector-expanded' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={`Task inspector ${task.id}`}
@@ -137,11 +140,14 @@ export default function Inspector({
       >
         <header className="inspector-top">
           <span>
-            <span className="subtle">Workspace</span>
+            <span className="subtle">{project?.name ?? 'Workspace'}</span>
             <ChevronRight size={13} />
-            <span className="mono">{task.id}</span>
+            <span>{parentTask?.parent_task_id ? 'Sub-subtask' : task.parent_task_id ? 'Subtask' : 'Task'}</span>
           </span>
           <div>
+            <IconButton label={wide ? 'Shrink task details' : 'Expand task details'} onClick={() => setWide((value) => !value)}>
+              {wide ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </IconButton>
             <IconButton
               label="Copy task link"
               onClick={() => {
@@ -198,7 +204,7 @@ export default function Inspector({
             {task.parent_task_id && (
               <div>
                 <span>Parent task</span>
-                <span className="property-value mono">{task.parent_task_id}</span>
+                <span className="property-value">{parentTask?.title ?? task.parent_task_id}</span>
               </div>
             )}
             <div>

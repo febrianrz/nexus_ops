@@ -7,6 +7,7 @@ import { ProtocolError } from '@/lib/protocol';
 import { asc, eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { putObject } from '@/lib/object-storage';
 export const runtime = 'nodejs';
 const metadata = { id: taskAttachments.id, filename: taskAttachments.filename, mime_type: taskAttachments.mime_type, size: taskAttachments.size, created_at: taskAttachments.created_at };
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
@@ -46,7 +47,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const error = attachmentError(files);
     if (error) throw new ProtocolError(error, 422);
     const createdAt = new Date().toISOString();
-    const rows = await Promise.all(files.map(async (file) => ({ id: randomUUID(), task_id: id, workspace_id: task.workspace_id!, uploaded_by: user.id, filename: attachmentName(file.name), mime_type: file.type.slice(0, 200) || 'application/octet-stream', size: file.size, content: Buffer.from(await file.arrayBuffer()), created_at: createdAt })));
+    const rows = await Promise.all(files.map(async (file) => { const content = Buffer.from(await file.arrayBuffer()); return { id: randomUUID(), task_id: id, workspace_id: task.workspace_id!, uploaded_by: user.id, filename: attachmentName(file.name), mime_type: file.type.slice(0, 200) || 'application/octet-stream', size: file.size, content, object_url: await putObject(`attachments/${task.workspace_id}/${id}/${randomUUID()}-${attachmentName(file.name)}`, content, file.type || 'application/octet-stream'), created_at: createdAt }; }));
     const attachments = await database().transaction(async (tx) => tx.insert(taskAttachments).values(rows).returning(metadata));
     return NextResponse.json({ attachments }, { status: 201 });
   });

@@ -25,6 +25,11 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   useEffect(() => {
     const theme = localStorage.getItem('nexus-theme');
     if (theme) document.documentElement.dataset.theme = theme;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('error') === 'alter_auth_failed') {
+      const reason = params.get('reason');
+      setError(reason === 'profile' ? 'Alter One did not return a verified email.' : reason === 'token' ? 'Alter One authorization could not be exchanged. Please try again.' : 'Alter One login was not completed. Please try again.');
+    }
   }, []);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -272,6 +277,7 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
               )}
             </Button>
           </form>
+          {!registering && <a className="alter-one-button" href={typeof window !== 'undefined' && window.location.hostname === '0.0.0.0' ? 'http://localhost:3000/api/auth/alter/start' : '/api/auth/alter/start'}><span className="alter-one-brand"><img src="https://one.alterindonesia.com/logo-alter.webp" alt="Alter One" />Continue with Alter One</span><ArrowRight size={15} /></a>}
           <div className="auth-form-footer">
             <LockKeyhole size={12} />
             <span>Your people. Your projects. Your workspace.</span>
