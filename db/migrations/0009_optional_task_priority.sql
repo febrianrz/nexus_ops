@@ -1,0 +1,1 @@
+ALTER TYPE "public"."priority" ADD VALUE IF NOT EXISTS 'NONE';

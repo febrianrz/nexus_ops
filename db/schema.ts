@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import {
+  boolean,
   check,
+  customType,
   doublePrecision,
   index,
   integer,
@@ -22,7 +24,7 @@ export const taskState = pgEnum('task_state', [
   'BLOCKED',
   'DONE',
 ]);
-export const priority = pgEnum('priority', ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
+export const priority = pgEnum('priority', ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'NONE']);
 export const sourceType = pgEnum('source_type', ['TICKET', 'GITHUB_ISSUE', 'GITHUB_PR', 'MANUAL']);
 export const eventType = pgEnum('event_type', [
   'COMMENT',
@@ -59,6 +61,10 @@ export const tasks = pgTable(
     id: text().primaryKey(),
     workspace_id: text().references((): AnyPgColumn => workspaces.id, { onDelete: 'cascade' }),
     owner_user_id: text().references((): AnyPgColumn => users.id, { onDelete: 'set null' }),
+    project_id: text().references((): AnyPgColumn => projects.id, { onDelete: 'set null' }),
+    parent_task_id: text().references((): AnyPgColumn => tasks.id, { onDelete: 'cascade' }),
+    is_agent_task: boolean().notNull().default(false),
+    agent_key: text(),
     title: text().notNull(),
     description: text().notNull().default(''),
     state: taskState().notNull().default('TRIAGE'),
@@ -87,7 +93,14 @@ export const tasks = pgTable(
       'confidence_bounds',
       sql`${t.confidence_score} IS NULL OR (${t.confidence_score} >= 0 AND ${t.confidence_score} <= 1)`,
     ),
+    check(
+      'task_workspace_project_required',
+      sql`${t.workspace_id} IS NULL OR ${t.project_id} IS NOT NULL`,
+    ),
     index('task_workspace_idx').on(t.workspace_id),
+    index('task_project_idx').on(t.project_id),
+    index('task_parent_idx').on(t.parent_task_id),
+    index('task_agent_queue_idx').on(t.project_id, t.agent_key, t.state),
     index('task_owner_idx').on(t.owner_user_id),
     index('task_state_idx').on(t.state),
     index('task_assignee_idx').on(t.assignee_id),
@@ -192,3 +205,50 @@ export const workspaceInvitations = pgTable(
     index('workspace_invitation_email_idx').on(t.email),
   ],
 );
+
+export const projects = pgTable(
+  'projects',
+  {
+    id: text().primaryKey(),
+    workspace_id: text()
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    description: text().notNull().default(''),
+    created_by: text().references(() => users.id, { onDelete: 'set null' }),
+    created_at: timestamp({ mode: 'string', withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp({ mode: 'string', withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('project_workspace_name_unique').on(t.workspace_id, t.name),
+    index('project_workspace_idx').on(t.workspace_id),
+  ],
+);
+
+const attachmentBytes = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() { return 'bytea'; },
+});
+export const taskAttachments = pgTable('task_attachments', {
+  id: text().primaryKey(),
+  task_id: text().notNull().references(() => tasks.id, { onDelete: 'cascade' }),
+  workspace_id: text().notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  uploaded_by: text().references(() => users.id, { onDelete: 'set null' }),
+  filename: text().notNull(),
+  mime_type: text().notNull(),
+  size: integer().notNull(),
+  content: attachmentBytes().notNull(),
+  created_at: timestamp({ mode: 'string', withTimezone: true }).notNull().defaultNow(),
+}, (table) => [index('task_attachment_task_idx').on(table.task_id), check('attachment_size_bounds', sql`${table.size} >= 0 AND ${table.size} <= 10485760`)]);
+
+export const developerKeys = pgTable('developer_keys', {
+  id: text().primaryKey(),
+  workspace_id: text().notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  created_by: text().notNull().references(() => users.id, { onDelete: 'cascade' }),
+  name: text().notNull(),
+  prefix: text().notNull(),
+  token_hash: text().notNull(),
+  created_at: timestamp({ mode: 'string', withTimezone: true }).notNull().defaultNow(),
+  expires_at: timestamp({ mode: 'string', withTimezone: true }).notNull(),
+  last_used_at: timestamp({ mode: 'string', withTimezone: true }),
+  revoked_at: timestamp({ mode: 'string', withTimezone: true }),
+}, (table) => [uniqueIndex('developer_key_hash_unique').on(table.token_hash), index('developer_key_workspace_idx').on(table.workspace_id)]);

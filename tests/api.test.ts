@@ -11,6 +11,7 @@ let ingestRoutes: typeof import('../app/api/v1/ingest/route');
 let delegationRoutes: typeof import('../app/api/v1/tasks/[id]/delegate/route');
 let telemetryRoutes: typeof import('../app/api/v1/tasks/[id]/telemetry/route');
 let taskRoutes: typeof import('../app/api/v1/tasks/[id]/route');
+let workerRoutes: typeof import('../app/api/v1/agent/tasks/route');
 let workspaceRoutes: typeof import('../app/api/v1/workspace/route');
 const adminToken = 'integration-test-admin-token';
 function request(path: string, method: string, body?: unknown, token = adminToken) {
@@ -28,6 +29,8 @@ before(async () => {
   process.env.NEXUS_DEMO_MODE = 'true';
   process.env.NEXUS_ADMIN_TOKEN = adminToken;
   process.env.NEXUS_WEBHOOK_SECRET = 'integration-test-webhook-secret';
+  workerRoutes = await import('../app/api/v1/agent/tasks/route');
+  process.env.NEXUS_WORKER_TOKEN = adminToken;
   agentRoutes = await import('../app/api/v1/actors/agents/route');
   ingestRoutes = await import('../app/api/v1/ingest/route');
   delegationRoutes = await import('../app/api/v1/tasks/[id]/delegate/route');
@@ -38,84 +41,26 @@ before(async () => {
 after(async () => {
   await rm(temporaryDirectory, { recursive: true, force: true });
 });
-test('complete agent lifecycle: spawn, ingest, delegate, telemetry, human review and approval', async () => {
-  const spawned = await agentRoutes.POST(
-    request('/actors/agents', 'POST', {
-      handle: '@bot-integration',
-      display_name: 'Integration agent',
-      capabilities: ['testing'],
-    }),
-  );
-  assert.equal(spawned.status, 200);
-  const { actor, token } = await spawned.json();
-  assert.ok(token.startsWith('nxs_'));
-  assert.equal('api_key_hash' in actor, false);
-  const body = { title: 'Integration lifecycle task', source_type: 'TICKET', source_ref: 'TEST-1' };
-  const ingest = await ingestRoutes.POST(request('/ingest', 'POST', body));
-  assert.equal(ingest.status, 200);
-  const { task } = await ingest.json();
+test('external worker claims queued tasks, reports testing readiness, and a human completes the task', async () => {
+  const body = { title: 'External worker lifecycle', source_type: 'MANUAL', source_ref: 'worker-lifecycle', project_id: 'demo-project', is_agent_task: true, agent_key: 'backend' };
+  const ingested = await ingestRoutes.POST(request('/ingest', 'POST', body));
+  assert.equal(ingested.status, 200);
+  const task = (await ingested.json()).task;
   const duplicate = await (await ingestRoutes.POST(request('/ingest', 'POST', body))).json();
   assert.equal(duplicate.duplicate, true);
   assert.equal(duplicate.task.id, task.id);
-  const handed = await delegationRoutes.POST(
-    request(`/tasks/${task.id}/delegate`, 'POST', {
-      target_handle: actor.handle,
-      message: 'Please run verification',
-    }),
-    ctx(task.id),
-  );
-  assert.equal(handed.status, 200);
-  assert.equal((await handed.json()).hop_count, 1);
-  const telemetry = await telemetryRoutes.PATCH(
-    request(
-      `/tasks/${task.id}/telemetry`,
-      'PATCH',
-      {
-        live_activity_text: 'Running integration suite',
-        confidence_score: 0.97,
-        tool_call: { name: 'test_runner', output: '12 checks passed' },
-      },
-      token,
-    ),
-    ctx(task.id),
-  );
+  const claimed = await workerRoutes.GET(request('/agent/tasks?project_id=demo-project&agent_key=backend', 'GET'));
+  assert.equal(claimed.status, 200);
+  const workerTask = (await claimed.json()).tasks.find((item: { id: string }) => item.id === task.id);
+  assert.equal(workerTask.state, 'EXECUTING');
+  assert.ok(workerTask.lock_token);
+  const telemetry = await telemetryRoutes.PATCH(request(`/tasks/${task.id}/telemetry`, 'PATCH', { state: 'WAITING_HUMAN', confidence_score: .97, lock_token: workerTask.lock_token, tool_call: { name: 'test_runner', output: 'Checks passed' } }), ctx(task.id));
   assert.equal(telemetry.status, 200);
-  assert.equal((await telemetry.json()).confidence_score, 0.97);
-  const invalid = await telemetryRoutes.PATCH(
-    request(`/tasks/${task.id}/telemetry`, 'PATCH', { confidence_score: 2 }, token),
-    ctx(task.id),
-  );
-  assert.equal(invalid.status, 422);
-  const denied = await taskRoutes.PATCH(
-    request(`/tasks/${task.id}`, 'PATCH', { action: 'approve' }, token),
-    ctx(task.id),
-  );
-  assert.equal(denied.status, 401);
-  const workspace = await (
-    await workspaceRoutes.GET(request('/workspace', 'GET', undefined, token))
-  ).json();
-  assert.deepEqual(
-    workspace.tasks.map((t: { id: string }) => t.id),
-    [task.id],
-  );
-  assert.ok(workspace.events.every((e: { task_id: string }) => e.task_id === task.id));
-  assert.ok(workspace.actors.every((a: Record<string, unknown>) => !('api_key_hash' in a)));
-  const ready = await telemetryRoutes.PATCH(
-    request(`/tasks/${task.id}/telemetry`, 'PATCH', { state: 'WAITING_HUMAN' }, token),
-    ctx(task.id),
-  );
-  assert.equal(ready.status, 200);
-  const approved = await taskRoutes.PATCH(
-    request(`/tasks/${task.id}`, 'PATCH', { action: 'approve' }),
-    ctx(task.id),
-  );
-  assert.equal(approved.status, 200);
-  assert.equal((await approved.json()).state, 'DONE');
-  const late = await telemetryRoutes.PATCH(
-    request(`/tasks/${task.id}/telemetry`, 'PATCH', { state: 'EXECUTING' }, token),
-    ctx(task.id),
-  );
-  assert.equal(late.status, 409);
+  assert.equal((await telemetry.json()).state, 'WAITING_HUMAN');
+  const approval = await taskRoutes.PATCH(request(`/tasks/${task.id}`, 'PATCH', { action: 'approve' }), ctx(task.id));
+  assert.equal(approval.status, 200);
+  assert.equal((await approval.json()).state, 'DONE');
+  assert.equal((await telemetryRoutes.PATCH(request(`/tasks/${task.id}/telemetry`, 'PATCH', { state: 'EXECUTING', lock_token: workerTask.lock_token }), ctx(task.id))).status, 409);
 });
 test('webhook signatures are verified against the raw body and GitHub payloads normalize', async () => {
   const raw = JSON.stringify({
@@ -151,65 +96,23 @@ test('webhook signatures are verified against the raw body and GitHub payloads n
   assert.equal((await ingestRoutes.POST(bad)).status, 401);
 });
 test('untrusted input and unauthorized mutations fail at the API boundary', async () => {
-  const bad = await agentRoutes.POST(
-    request('/actors/agents', 'POST', { handle: 'INVALID', display_name: 'Bad agent' }),
-  );
-  assert.equal(bad.status, 422);
-  const unknown = await ingestRoutes.POST(
-    request('/ingest', 'POST', {
-      title: 'Bad payload',
-      source_type: 'MANUAL',
-      source_ref: 'TEST-2',
-      admin: true,
-    }),
-  );
-  assert.equal(unknown.status, 422);
-  const unauthenticated = new NextRequest('http://localhost:3002/api/v1/ingest', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title: 'No credentials', source_type: 'MANUAL', source_ref: 'TEST-3' }),
-  });
-  assert.equal((await ingestRoutes.POST(unauthenticated)).status, 401);
+  const invalid = await ingestRoutes.POST(request('/ingest', 'POST', { title: 'Bad payload', source_type: 'MANUAL', source_ref: 'invalid', admin: true }));
+  assert.equal(invalid.status, 422);
+  const req = new NextRequest('http://localhost:3002/api/v1/ingest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Missing credentials', source_type: 'MANUAL', source_ref: 'denied' }) });
+  assert.equal((await ingestRoutes.POST(req)).status, 401);
+  assert.equal((await workerRoutes.GET(request('/agent/tasks?project_id=demo-project&agent_key=backend', 'GET', undefined, 'invalid-token'))).status, 401);
+  assert.equal((await workerRoutes.GET(request('/agent/tasks', 'GET'))).status, 422);
 });
-test('the API stops a looping chain on hop four, blocks telemetry, and allows a human reset', async () => {
-  const created = await (
-    await ingestRoutes.POST(
-      request('/ingest', 'POST', {
-        title: 'Circuit breaker integration',
-        source_type: 'MANUAL',
-        source_ref: 'TEST-LOOP',
-      }),
-    )
-  ).json();
-  let task = created.task;
-  for (let hop = 1; hop <= 4; hop++) {
-    const response = await delegationRoutes.POST(
-      request(`/tasks/${task.id}/delegate`, 'POST', {
-        target_handle: task.assignee_id === 'coder' ? '@bot-qa' : '@bot-coder',
-      }),
-      ctx(task.id),
-    );
-    assert.equal(response.status, 200);
-    task = await response.json();
-    assert.equal(task.hop_count, hop);
-  }
-  assert.equal(task.state, 'WAITING_HUMAN');
-  const telemetry = await telemetryRoutes.PATCH(
-    request(`/tasks/${task.id}/telemetry`, 'PATCH', { state: 'EXECUTING' }),
-    ctx(task.id),
-  );
-  assert.equal(telemetry.status, 409);
-  const extra = await delegationRoutes.POST(
-    request(`/tasks/${task.id}/delegate`, 'POST', { target_handle: '@bot-qa' }),
-    ctx(task.id),
-  );
-  assert.equal(extra.status, 409);
-  const reset = await taskRoutes.PATCH(
-    request(`/tasks/${task.id}`, 'PATCH', { action: 'resume' }),
-    ctx(task.id),
-  );
-  assert.equal(reset.status, 200);
-  const resumed = await reset.json();
-  assert.equal(resumed.hop_count, 0);
-  assert.equal(resumed.state, 'EXECUTING');
+test('retired agent registration and delegation APIs return Gone', async () => {
+  assert.equal((await agentRoutes.POST(request('/actors/agents', 'POST', { handle: '@old-agent' }))).status, 410);
+  assert.equal((await delegationRoutes.POST(request('/tasks/NEX-104/delegate', 'POST', { target_handle: '@old-agent' }), ctx('NEX-104'))).status, 410);
+});
+test('concurrent worker claims cannot claim the same task twice and old locks cannot update a reset task', async () => {
+  const response = await ingestRoutes.POST(request('/ingest', 'POST', { title: 'Concurrent claims', source_type: 'MANUAL', source_ref: 'concurrent-worker', project_id: 'demo-project', is_agent_task: true, agent_key: 'qa' }));
+  const task = (await response.json()).task;
+  const results = await Promise.all([workerRoutes.GET(request('/agent/tasks?project_id=demo-project&agent_key=qa', 'GET')), workerRoutes.GET(request('/agent/tasks?project_id=demo-project&agent_key=qa', 'GET'))]);
+  const claims = (await Promise.all(results.map((result) => result.json()))).flatMap((result) => result.tasks).filter((item) => item.id === task.id);
+  assert.equal(claims.length, 1);
+  assert.equal((await taskRoutes.PATCH(request(`/tasks/${task.id}`, 'PATCH', { action: 'queue' }), ctx(task.id))).status, 200);
+  assert.equal((await telemetryRoutes.PATCH(request(`/tasks/${task.id}/telemetry`, 'PATCH', { state: 'EXECUTING', lock_token: claims[0].lock_token }), ctx(task.id))).status, 409);
 });

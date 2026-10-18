@@ -73,7 +73,7 @@ export function WorkspacePicker({
             <h3>
               Invitations <span className="subtle">{team.invitations.length}</span>
             </h3>
-            <p className="subtle">Accept to share tasks and agents with this team.</p>
+            <p className="subtle">Accept to share projects and tasks with this team.</p>
             {team.invitations.map((invitation) => (
               <div className="member-row" key={invitation.id}>
                 <span>
@@ -205,7 +205,8 @@ export function WorkspaceTeam({ user }: { user: SessionUser }) {
           Members <span className="subtle">{team.members.length}</span>
         </h3>
         <p className="subtle">
-          Admins manage members and agents. Members can create, delegate, and review tasks.
+          Admins manage membership. Members can create projects, tasks, and subtasks, then review
+          work.
         </p>
         {error && (
           <p className="team-error" role="alert">

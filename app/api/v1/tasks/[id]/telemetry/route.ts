@@ -1,4 +1,4 @@
-import { authenticate, route } from '@/lib/api';
+import { authenticate, authenticateWorker, route } from '@/lib/api';
 import { event, ProtocolError } from '@/lib/protocol';
 import { transactForRequest as transact } from '@/lib/workspace-scope';
 import { NextRequest } from 'next/server';
@@ -7,7 +7,7 @@ const input = z
   .object({
     live_activity_text: z.string().max(200).optional(),
     confidence_score: z.number().min(0).max(1).optional(),
-    state: z.enum(['EXECUTING', 'WAITING_HUMAN']).optional(),
+    state: z.enum(['EXECUTING', 'WAITING_HUMAN', 'DONE']).optional(),
     lock_token: z.string().optional(),
     tool_call: z.object({ name: z.string().max(100), output: z.string().max(10000) }).optional(),
   })
@@ -17,13 +17,18 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     const body = input.parse(await req.json());
     const { id } = await ctx.params;
     return transact(req, (w) => {
-      const caller = authenticate(req, w);
+      const worker = authenticateWorker(req, w);
+      const caller = worker ?? authenticate(req, w);
       const task = w.tasks.find((t) => t.id === id);
       if (!task) throw new ProtocolError('Task not found', 404);
+      if (worker && !task.is_agent_task)
+        throw new ProtocolError('Workers can only update tasks in the external queue', 403);
       if (caller.type === 'AGENT' && task.assignee_id !== caller.id)
         throw new ProtocolError('Only the assigned agent may update telemetry', 403);
-      if (task.state === 'DONE' || task.hop_count >= task.max_hops)
-        throw new ProtocolError('Execution is locked; human intervention is required', 409);
+      if (task.state === 'DONE')
+        throw new ProtocolError('Completed tasks cannot receive telemetry', 409);
+      if (task.is_agent_task && (!task.lock_token || task.lock_token !== body.lock_token))
+        throw new ProtocolError('A valid worker lock token is required', 409);
       if (task.lock_token && task.lock_token !== body.lock_token)
         throw new ProtocolError('Lock token mismatch', 409);
       if (body.live_activity_text !== undefined) task.live_activity_text = body.live_activity_text;

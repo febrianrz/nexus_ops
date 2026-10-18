@@ -6,6 +6,8 @@ interface AppStore extends Workspace {
   loaded: boolean;
   storage: string;
   workspaceId: string | null;
+  selectedProjectId: string | null;
+  selectProject: (id: string) => void;
   team: TeamData;
   refresh: () => Promise<void>;
   switchWorkspace: (id: string) => Promise<void>;
@@ -34,13 +36,23 @@ export const useWorkspace = create<AppStore>((set, get) => ({
   actors: [],
   tasks: [],
   events: [],
+  projects: [],
   loaded: false,
   storage: 'postgresql',
   workspaceId: null,
+  selectedProjectId: null,
   team: { workspaces: [], current: null, members: [], pending: [], invitations: [] },
   switchWorkspace: async (id) => {
     refreshVersion++;
-    set({ workspaceId: id, actors: [], tasks: [], events: [], loaded: false });
+    set({
+      workspaceId: id,
+      selectedProjectId: null,
+      projects: [],
+      actors: [],
+      tasks: [],
+      events: [],
+      loaded: false,
+    });
     await get().refresh();
   },
   refresh: async () => {
@@ -48,7 +60,14 @@ export const useWorkspace = create<AppStore>((set, get) => ({
     const team = await api<TeamData>('/workspaces');
     if (version !== refreshVersion) return;
     if (team.current?.id !== get().workspaceId)
-      set({ actors: [], tasks: [], events: [], loaded: false });
+      set({
+        actors: [],
+        tasks: [],
+        events: [],
+        projects: [],
+        selectedProjectId: null,
+        loaded: false,
+      });
     set({ team, workspaceId: team.current?.id ?? null });
     if (!team.current) {
       set({ loaded: true });
@@ -56,10 +75,21 @@ export const useWorkspace = create<AppStore>((set, get) => ({
     }
     try {
       const data = await api<Workspace & { storage: string }>('/workspace');
-      if (version === refreshVersion) set({ ...data, loaded: true });
+      if (version === refreshVersion) {
+        const selected = get().selectedProjectId;
+        set({
+          ...data,
+          selectedProjectId: data.projects.some((project) => project.id === selected)
+            ? selected
+            : (data.projects[0]?.id ?? null),
+          loaded: true,
+        });
+      }
     } catch (error) {
-      if (version === refreshVersion) set({ actors: [], tasks: [], events: [], loaded: false });
+      if (version === refreshVersion)
+        set({ actors: [], tasks: [], events: [], projects: [], loaded: false });
       throw error;
     }
   },
+  selectProject: (id) => set({ selectedProjectId: id }),
 }));

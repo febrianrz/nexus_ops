@@ -15,6 +15,7 @@ import {
   GitBranch,
   Link2,
   MessageSquare,
+  Plus,
   Send,
   ShieldAlert,
   Terminal,
@@ -23,6 +24,13 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Avatar, Button, IconButton, PriorityIcon } from './ui';
+import { CreateTask } from './workspace-forms';
+import { TaskPlanningCell } from './task-planning';
+import { AssigneePicker } from './assignee-picker';
+import { PriorityPicker } from './priority-picker';
+import { TaskDescription } from './task-description';
+import { TaskAttachments } from './task-attachments';
+import { TaskChecklist } from './task-checklist';
 export default function Inspector({
   task,
   onClose,
@@ -34,20 +42,29 @@ export default function Inspector({
   onApprove: () => void;
   busy: boolean;
 }) {
-  const { actors, events, refresh } = useWorkspace();
+  const { actors, events, refresh, tasks, projects } = useWorkspace();
   const [tab, setTab] = useState('timeline');
   const [message, setMessage] = useState('');
   const [cursor, setCursor] = useState(0);
   const [sending, setSending] = useState(false);
   const [expanded, setExpanded] = useState<string[]>(['context']);
   const [copy, setCopy] = useState(false);
+  const [showSubtask, setShowSubtask] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const panel = useRef<HTMLElement>(null);
   const mention = message.match(/@([\w-]*)$/);
   const suggestions = mention
-    ? actors.filter((a) => a.handle.toLowerCase().includes(mention[1].toLowerCase())).slice(0, 6)
+    ? actors
+        .filter(
+          (a) => a.type === 'HUMAN' && a.handle.toLowerCase().includes(mention[1].toLowerCase()),
+        )
+        .slice(0, 6)
     : [];
-  const actor = actors.find((a) => a.id === task.assignee_id);
+  const statusLabel = task.state === 'TRIAGE' || task.state === 'QUEUED' ? 'Todo' : task.state === 'EXECUTING' ? 'Progress' : task.state === 'DONE' ? 'Done' : 'Testing';
+  const children = tasks.filter((item) => item.parent_task_id === task.id);
+  const parentTask = tasks.find((item) => item.id === task.parent_task_id);
+  const canAddSubtask = !task.parent_task_id || (parentTask && !parentTask.parent_task_id);
+  const project = projects.find((item) => item.id === task.project_id);
   const timeline = events
     .filter((e) => e.task_id === task.id)
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -64,18 +81,14 @@ export default function Inspector({
     setCursor(0);
     textarea.current?.focus();
   }
-  async function submit(delegating = false) {
+  async function submit() {
     if (!message.trim()) return;
     setSending(true);
     try {
-      await api(
-        `/tasks/${task.id}/${delegating ? 'delegate' : 'events'}`,
-        'POST',
-        delegating ? { message } : { message },
-      );
+      await api(`/tasks/${task.id}/events`, 'POST', { message });
       setMessage('');
       await refresh();
-      toast.success(delegating ? 'Task delegated' : 'Comment added');
+      toast.success('Comment added');
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -147,46 +160,47 @@ export default function Inspector({
           <div className="inspector-heading">
             <span className={`state-tag state-${task.state.toLowerCase()}`}>
               <span />
-              {task.state === 'WAITING_HUMAN'
-                ? 'Human review'
-                : task.state.toLowerCase().replaceAll('_', ' ')}
+              {statusLabel}
             </span>
             <h2>{task.title}</h2>
-            <p>{task.description}</p>
+            <TaskDescription key={task.id} task={task} />
           </div>
           <div className="properties">
+            <div><span>Start date</span><TaskPlanningCell task={task} field="start_date" /></div>
+            <div><span>Due date</span><TaskPlanningCell task={task} field="due_date" /></div>
+            <div><span>Completion</span><TaskPlanningCell task={task} field="completion" /></div>
             <div>
               <span>Status</span>
               <span className="property-value">
                 <span className={`status-dot ${task.state.toLowerCase()}`} />
-                {task.state === 'EXECUTING'
-                  ? 'Agent executing'
-                  : task.state === 'WAITING_HUMAN'
-                    ? 'Awaiting your review'
-                    : task.state.toLowerCase()}
+                {statusLabel}
               </span>
             </div>
             <div>
-              <span>Assignee</span>
+              <span>Project</span>
+              <span className="property-value">{project?.name ?? 'Unknown project'}</span>
+            </div>
+            <div>
+              <span>Assignee</span><span className="property-value"><AssigneePicker task={task} showLabel /></span>
+            </div>
+            <div>
+              <span>Task type</span>
               <span className="property-value">
-                <Avatar actor={actor} size={22} />
-                {actor?.handle ?? 'Unassigned'}
+                {task.is_agent_task ? `External worker · ${task.agent_key}` : 'Human task'}
               </span>
             </div>
             <div>
               <span>Priority</span>
               <span className="property-value">
-                <PriorityIcon priority={task.priority} />
-                {task.priority.toLowerCase()}
+                <PriorityPicker task={task} showLabel />
               </span>
             </div>
-            <div>
-              <span>Delegation depth</span>
-              <span className={`property-value mono ${task.hop_count >= 4 ? 'warning-text' : ''}`}>
-                <GitBranch size={14} />
-                {task.hop_count} / {task.max_hops} hops
-              </span>
-            </div>
+            {task.parent_task_id && (
+              <div>
+                <span>Parent task</span>
+                <span className="property-value mono">{task.parent_task_id}</span>
+              </div>
+            )}
             <div>
               <span>Source</span>
               <span className="property-value mono">
@@ -204,28 +218,57 @@ export default function Inspector({
               </span>
             </div>
           </div>
-          {task.state === 'WAITING_HUMAN' && (
-            <div className={`inspector-review ${task.hop_count >= 4 ? 'warning' : ''}`}>
+          <TaskAttachments key={task.id} taskId={task.id} />
+          {task.parent_task_id && parentTask?.parent_task_id && <TaskChecklist key={task.id} task={task} />}
+          {canAddSubtask && (
+            <section className="subtask-section">
               <div>
-                {task.hop_count >= 4 ? <ShieldAlert size={20} /> : <Check size={20} />}
+                <strong>{task.parent_task_id ? 'Sub-subtasks' : 'Subtasks'}</strong>
+                <span>{children.length}</span>
+              </div>
+              {children.map((child) => (
+                <div className="subtask-row" key={child.id}>
+                  <span className="mono">{child.id}</span>
+                  <strong>{child.title}</strong>
+                  <span className={`state-tag state-${child.state.toLowerCase()}`}>
+                    {child.state.toLowerCase().replaceAll('_', ' ')}
+                  </span>
+                </div>
+              ))}
+              {showSubtask ? (
+                project && (
+                  <CreateTask
+                    project={project}
+                    parentTaskId={task.id}
+                    onClose={() => setShowSubtask(false)}
+                    onCreated={async () => {
+                      await refresh();
+                      setShowSubtask(false);
+                    }}
+                  />
+                )
+              ) : (
+                <Button onClick={() => setShowSubtask(true)}>
+                  <Plus size={14} />
+                  {task.parent_task_id ? 'Add sub-subtask' : 'Add subtask'}
+                </Button>
+              )}
+            </section>
+          )}
+          {task.state === 'WAITING_HUMAN' && (
+            <div className="inspector-review">
+              <div>
+                <Check size={20} />
                 <div>
-                  <strong>
-                    {task.hop_count >= 4 ? 'Circuit breaker is open' : 'Ready for a human touch'}
-                  </strong>
-                  <p>
-                    {task.hop_count >= 4
-                      ? 'Execution paused at the maximum hop limit. Review the timeline before resuming.'
-                      : 'The agent finished its work. Review the context, then approve.'}
-                  </p>
+                  <strong>Ready for your review</strong>
+                  <p>The external worker finished its work. Review the context, then approve.</p>
                 </div>
               </div>
               <Button className="primary" disabled={busy} onClick={onApprove}>
-                {task.hop_count >= 4 ? 'Resume execution' : 'Approve & merge'}
+                Approve &amp; complete
                 <ArrowRight size={14} />
               </Button>
-              {task.hop_count < 4 && (
-                <small>Marks this task done. Merge the pull request in GitHub.</small>
-              )}
+              <small>Marks this task complete. Merge any pull request in GitHub.</small>
             </div>
           )}
           <div className="inspector-tabs" role="tablist">
@@ -292,9 +335,10 @@ export default function Inspector({
                       payload: {
                         task_id: task.id,
                         state: task.state,
-                        hop_count: task.hop_count,
-                        max_hops: task.max_hops,
-                        assignee: actor?.handle,
+                        project_id: task.project_id,
+                        parent_task_id: task.parent_task_id,
+                        is_agent_task: task.is_agent_task,
+                        agent_key: task.agent_key,
                         confidence_score: task.confidence_score,
                       },
                     },
@@ -393,7 +437,7 @@ export default function Inspector({
               setMessage(e.target.value);
               setCursor(0);
             }}
-            aria-label="Comment or delegate with a mention"
+            aria-label="Comment or mention a teammate"
             onKeyDown={(e) => {
               if (suggestions.length) {
                 if (e.key === 'ArrowDown') {
@@ -420,16 +464,6 @@ export default function Inspector({
               Mention to collaborate
             </span>
             <div>
-              {/@[a-z][a-z0-9-]+/.test(message) && task.state !== 'DONE' && (
-                <Button
-                  disabled={sending || busy}
-                  className="delegate-comment"
-                  onClick={() => submit(true)}
-                >
-                  Delegate
-                  <ArrowRight size={12} />
-                </Button>
-              )}
               <IconButton
                 label="Send comment"
                 onClick={() => submit()}

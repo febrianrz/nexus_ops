@@ -21,6 +21,10 @@ const actor = (
   created_at: date,
 });
 const base = {
+  project_id: 'demo-project',
+  parent_task_id: null,
+  is_agent_task: true,
+  agent_key: 'worker',
   max_hops: 4,
   lock_token: null,
   delegated_by_id: null,
@@ -141,6 +145,17 @@ export function seedWorkspace(): Workspace {
     },
   ];
   return {
+    projects: [
+      {
+        id: 'demo-project',
+        workspace_id: 'demo',
+        name: 'General',
+        description: '',
+        created_by: null,
+        created_at: date,
+        updated_at: date,
+      },
+    ],
     actors,
     tasks,
     events: tasks.flatMap((task) => [

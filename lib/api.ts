@@ -4,6 +4,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { ZodError } from 'zod';
 import { ProtocolError } from './protocol';
 import type { Actor, Workspace } from './types';
+import { developerKeyIdentity } from './developer-key-auth';
 export function hashKey(value: string) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -13,6 +14,11 @@ function equal(a: string, b: string) {
   return timingSafeEqual(aa, bb);
 }
 export function authenticate(req: NextRequest, w: Workspace, adminOnly = false): Actor {
+  const managed = developerKeyIdentity(req);
+  if (managed && !adminOnly) {
+    const actor = w.actors.find((candidate) => candidate.id === managed.actorId && candidate.type === 'HUMAN');
+    if (actor) return actor;
+  }
   const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   const admin = w.actors.find((a) => a.id === 'admin') ?? w.actors.find((a) => a.type === 'HUMAN');
   if (
@@ -37,6 +43,18 @@ export function authenticate(req: NextRequest, w: Workspace, adminOnly = false):
     adminOnly ? 'Human authentication required' : 'Please sign in to continue',
     401,
   );
+}
+export function authenticateWorker(req: NextRequest, w: Workspace): Actor | null {
+  const managed = developerKeyIdentity(req);
+  if (managed) return w.actors.find((actor) => actor.id === managed.actorId && actor.type === 'HUMAN') ?? null;
+  const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  if (
+    !token ||
+    !(process.env.NEXUS_WORKER_TOKEN ?? process.env.NEXUS_ADMIN_TOKEN) ||
+    !equal(token, process.env.NEXUS_WORKER_TOKEN ?? process.env.NEXUS_ADMIN_TOKEN!)
+  )
+    return null;
+  return w.actors.find((actor) => actor.type === 'HUMAN') ?? null;
 }
 export function publicActor(a: Actor) {
   const { api_key_hash, webhook_url, ...safe } = a;

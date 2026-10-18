@@ -10,19 +10,24 @@ import {
   ArrowUpRight,
   Bell,
   Bot,
+  Flag,
+  Layers,
   Check,
   CheckCheck,
   ChevronRight,
+  ChevronDown,
   ChevronsUpDown,
   Circle,
   CircleDot,
   FileCode2,
   Filter,
+  FolderKanban,
   GitBranch,
   GitPullRequest,
   Globe,
   HelpCircle,
   Keyboard,
+  KeyRound,
   LayoutDashboard,
   LayoutGrid,
   List,
@@ -31,6 +36,7 @@ import {
   Menu,
   Moon,
   Plus,
+  ListPlus,
   Radio,
   Search,
   Settings2,
@@ -45,34 +51,207 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  type CSSProperties,
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { toast, Toaster } from 'sonner';
 import { WorkspacePicker, WorkspaceTeam } from './workspace-team';
 import Inspector from './inspector';
 import TaskCard from './task-card';
 import { Avatar, Button, EmptyState, IconButton, Modal, PriorityIcon } from './ui';
-import { CreateTask, IntegrationSetup, SpawnAgent } from './workspace-forms';
+import { CreateTask, IntegrationSetup } from './workspace-forms';
+import ProjectManager from './project-manager';
+import AgentSettings from './agent-settings';
+import { AssigneePicker } from './assignee-picker';
+import DeveloperSettings from './developer-settings';
+import { TaskPlanningCell } from './task-planning';
+import { Notifications } from './notifications';
+import { PriorityPicker } from './priority-picker';
+import { SortableTaskRow, TaskOrderProvider } from './task-order';
+import { priorityLabel } from '@/lib/task-priority';
 const columns: { state: TaskState; label: string; className: string; icon: typeof Circle }[] = [
-  { state: 'TRIAGE', label: 'Triage', className: 'triage', icon: CircleDot },
-  { state: 'QUEUED', label: 'Queued', className: 'queued', icon: Circle },
-  { state: 'EXECUTING', label: 'Agent executing', className: 'executing', icon: LoaderCircle },
-  { state: 'WAITING_HUMAN', label: 'Human review', className: 'review', icon: CircleDot },
+  { state: 'TRIAGE', label: 'Todo', className: 'triage', icon: CircleDot },
+  { state: 'EXECUTING', label: 'Progress', className: 'executing', icon: LoaderCircle },
+  { state: 'WAITING_HUMAN', label: 'Testing', className: 'review', icon: CircleDot },
   { state: 'DONE', label: 'Done', className: 'done', icon: CheckCheck },
 ];
-const filters = ['All tasks', 'My approvals', 'Active agents', 'GitHub PRs'];
-type ModalKind = 'task' | 'spawn' | 'help' | 'integrations' | 'settings' | 'workspaces' | null;
+const taskStatuses: { label: string; state: TaskState; color: string }[] = [
+  { label: 'Todo', state: 'TRIAGE', color: 'todo' },
+  { label: 'Progress', state: 'EXECUTING', color: 'progress' },
+  { label: 'Testing', state: 'WAITING_HUMAN', color: 'review' },
+  { label: 'Done', state: 'DONE', color: 'done' },
+];
+const taskStatusIndex = (state: TaskState) => state === 'QUEUED' ? 0 : state === 'BLOCKED' ? 2 : Math.max(0, taskStatuses.findIndex((item) => item.state === state));
+const filters = ['All tasks', 'My approvals', 'Agent tasks', 'GitHub PRs'];
+type ModalKind =
+  | 'task'
+  | 'help'
+  | 'integrations'
+  | 'workspace-settings'
+  | 'members-settings'
+  | 'agents'
+  | 'developer'
+  | 'workspaces'
+  | 'projects'
+  | null;
+
+function renderProjectTaskTree(
+  tasks: Task[],
+  depth: number,
+  childrenByParent: Map<string, Task[]>,
+  expandedTaskIds: string[],
+  onToggle: (taskId: string) => void,
+  onSelect: (taskId: string) => void,
+): ReactElement[] {
+  return tasks.map((task) => {
+    const children = childrenByParent.get(task.id) ?? [];
+    const expanded = expandedTaskIds.includes(task.id);
+    return (
+      <div className="project-task-branch" key={task.id}>
+        <div className="project-task-row" style={{ '--task-depth': depth } as CSSProperties}>
+          <button
+            className="project-task-link"
+            onClick={() => (children.length ? onToggle(task.id) : onSelect(task.id))}
+            title={task.title}
+            aria-expanded={children.length ? expanded : undefined}
+          >
+            <span className="mono">{task.id}</span>
+            <span>{task.title}</span>
+          </button>
+          {children.length > 0 && (
+            <button
+              className={`project-task-expand ${expanded ? 'expanded' : ''}`}
+              aria-label={`${expanded ? 'Collapse' : 'Expand'} subtasks for ${task.title}`}
+              aria-expanded={expanded}
+              onClick={() => onToggle(task.id)}
+            >
+              <ChevronRight size={13} />
+            </button>
+          )}
+        </div>
+        <AnimatePresence initial={false}>
+          {expanded && children.length > 0 && (
+            <motion.div
+              className="project-task-children"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {renderProjectTaskTree(children, depth + 1, childrenByParent, expandedTaskIds, onToggle, onSelect)}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    );
+  });
+}
+
+function renderProjectTableRows(
+  tasks: Task[],
+  depth: number,
+  childrenByParent: Map<string, Task[]>,
+  expandedTaskIds: string[],
+  actors: Actor[],
+  onToggle: (taskId: string) => void,
+  onSelect: (taskId: string) => void,
+  onAddSubtask: (taskId: string) => void,
+  onStatusClick: (task: Task, bounds: DOMRect) => void,
+): ReactElement[] {
+  return tasks.map((task) => {
+    const children = childrenByParent.get(task.id) ?? [];
+    const expanded = expandedTaskIds.includes(task.id);
+    const phase = typeof task.context_payload.phase === 'string' ? task.context_payload.phase : null;
+    return (
+      <div className="project-table-branch" key={task.id}>
+        <SortableTaskRow task={task}>
+          <div className="project-table-name" style={{ '--task-depth': depth } as CSSProperties}>
+            {children.length > 0 ? (
+              <button
+                className={`project-table-expand ${expanded ? 'expanded' : ''}`}
+                aria-label={`${expanded ? 'Collapse' : 'Expand'} subtasks for ${task.title}`}
+                aria-expanded={expanded}
+                onClick={() => onToggle(task.id)}
+              >
+                <ChevronRight size={13} />
+              </button>
+            ) : (
+              <span className="project-table-expander-space" />
+            )}
+            <button data-status-picker className={`project-row-status status-${task.state.toLowerCase()}`} aria-label={`Change status for ${task.title}: ${taskStatuses[taskStatusIndex(task.state)].label}`} aria-haspopup="menu" onClick={(event) => onStatusClick(task, event.currentTarget.getBoundingClientRect())}>
+              {task.state === 'DONE' ? <Check size={12} /> : task.state === 'TRIAGE' || task.state === 'QUEUED' ? null : <CircleDot size={14} />}
+            </button>
+            <button className="project-table-task" onClick={() => onSelect(task.id)} title={`${task.id}: ${task.title}`}>
+              <strong>{task.title}</strong>
+            </button>
+            {children.length > 0 && <button className="project-child-count" onClick={() => onToggle(task.id)} aria-label={`${children.length} subtasks for ${task.title}`}><GitBranch size={12} />{children.length}</button>}
+            {task.is_agent_task && <span title={`Agent: ${task.agent_key}`}><Bot size={13} /></span>}
+          </div>
+          <AssigneePicker task={task} />
+          <PriorityPicker task={task} />
+          <TaskPlanningCell task={task} field="due_date" />
+          <TaskPlanningCell task={task} field="start_date" />
+          <span className="project-table-phase">{phase ? <span>{phase}</span> : '–'}</span>
+          <TaskPlanningCell task={task} field="completion" />
+          {depth < 2 ? (
+            <button className="project-row-add" aria-label={`Add ${depth === 1 ? 'sub-subtask' : 'subtask'} to ${task.title}`} onClick={() => onAddSubtask(task.id)}><Plus size={14} /></button>
+          ) : <span />}
+        </SortableTaskRow>
+        <AnimatePresence initial={false}>
+          {expanded && children.length > 0 && (
+            <motion.div
+              className="project-table-children"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {renderProjectTableRows(children, depth + 1, childrenByParent, expandedTaskIds, actors, onToggle, onSelect, onAddSubtask, onStatusClick)}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    );
+  });
+}
+
 export default function Workspace({ user }: { user: SessionUser }) {
-  const { tasks, actors, events, refresh, loaded, storage, team, switchWorkspace } = useWorkspace();
+  const {
+    tasks: allTasks,
+    actors,
+    events: allEvents,
+    refresh,
+    loaded,
+    storage,
+    team,
+    switchWorkspace,
+    projects,
+    selectedProjectId,
+    selectProject,
+  } = useWorkspace();
   const [view, setView] = useState('overview');
   const [filter, setFilter] = useState('All tasks');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  const [subtaskParent, setSubtaskParent] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalKind>(null);
   const [layout, setLayout] = useState('board');
   const [sidebar, setSidebar] = useState(false);
-  const [notifications, setNotifications] = useState(false);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
+  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
+  const [expandedProjectTaskIds, setExpandedProjectTaskIds] = useState<string[]>([]);
+  const [collapsedProjectGroups, setCollapsedProjectGroups] = useState<string[]>([]);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [statusMenu, setStatusMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
+  const [statusSaving, setStatusSaving] = useState(false);
+  const profileMenuRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
-  const [simulation, setSimulation] = useState<string | null>(null);
   const [priority, setPriority] = useState('ALL');
   const [filterMenu, setFilterMenu] = useState(false);
   const [displayMenu, setDisplayMenu] = useState(false);
@@ -82,14 +261,6 @@ export default function Workspace({ user }: { user: SessionUser }) {
   const [theme, setTheme] = useState('dark');
   const [error, setError] = useState('');
   const [loggingOut, setLoggingOut] = useState(false);
-  const workspaceAdmin = team.current?.role === 'admin';
-  function openSpawn() {
-    if (!workspaceAdmin) {
-      toast.info('Only workspace admins can register agents.');
-      return;
-    }
-    setModal('spawn');
-  }
   async function selectWorkspace(id: string) {
     setSelected(null);
     setQuery('');
@@ -102,6 +273,10 @@ export default function Workspace({ user }: { user: SessionUser }) {
     setError('');
   }
   const currentActor = actors.find((actor) => actor.id === user.actorId);
+  const project = projects.find((item) => item.id === selectedProjectId) ?? projects[0];
+  const tasks = allTasks.filter((task) => task.project_id === project?.id);
+  const projectTaskIds = new Set(tasks.map((task) => task.id));
+  const events = allEvents.filter((event) => projectTaskIds.has(event.task_id));
   async function logout() {
     if (loggingOut) return;
     setLoggingOut(true);
@@ -119,12 +294,15 @@ export default function Workspace({ user }: { user: SessionUser }) {
       setLoggingOut(false);
     }
   }
-  const [dockOpen, setDockOpen] = useState(true);
   useEffect(() => {
     const savedWorkspace = localStorage.getItem(`nexus-workspace:${user.id}`);
     if (savedWorkspace) useWorkspace.setState({ workspaceId: savedWorkspace });
-    refresh().catch((e) => setError(e.message));
-    const id = setInterval(() => refresh().catch(() => {}), 10000);
+    const sync = () =>
+      refresh()
+        .then(() => setError(''))
+        .catch((e) => setError(e.message));
+    sync();
+    const id = setInterval(sync, 10000);
     const task = new URLSearchParams(location.search).get('task');
     if (task) setSelected(task);
     const saved = localStorage.getItem('nexus-theme');
@@ -135,6 +313,21 @@ export default function Workspace({ user }: { user: SessionUser }) {
     return () => clearInterval(id);
   }, [refresh]);
   useEffect(() => {
+    if (!team.current?.id || !projects.length) return;
+    const key = `nexus-project:${team.current.id}`;
+    const saved = localStorage.getItem(key);
+    const next = projects.find((item) => item.id === saved)?.id ?? projects[0].id;
+    if (next !== selectedProjectId) selectProject(next);
+  }, [team.current?.id, projects, selectedProjectId, selectProject]);
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!profileMenuRef.current?.contains(event.target as Node)) setProfileMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', closeOnOutsideClick);
+  }, [profileMenuOpen]);
+  useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName);
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -144,40 +337,67 @@ export default function Workspace({ user }: { user: SessionUser }) {
       if (e.key === 'Escape') {
         setCommandOpen(false);
         setModal(null);
-        setNotifications(false);
         setFilterMenu(false);
         setDisplayMenu(false);
+        setProfileMenuOpen(false);
+        setStatusMenu(null);
       }
-      if (!editing && e.key === 'n') setModal('task');
+      if (!editing && e.key === 'n' && project) setModal('task');
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [project]);
+  useEffect(() => {
+    if (!statusMenu) return;
+    const close = (event: PointerEvent) => {
+      if (!(event.target as Element).closest('[data-status-picker]')) setStatusMenu(null);
+    };
+    const closeOnScroll = () => setStatusMenu(null);
+    document.addEventListener('pointerdown', close);
+    window.addEventListener('scroll', closeOnScroll, true);
+    return () => { document.removeEventListener('pointerdown', close); window.removeEventListener('scroll', closeOnScroll, true); };
+  }, [statusMenu]);
+  async function updateTaskStatus(taskId: string, state: TaskState) {
+    if (statusSaving) return;
+    setStatusSaving(true);
+    try {
+      await api(`/tasks/${taskId}`, 'PATCH', { action: 'set-status', state });
+      await refresh();
+    } catch (error) { toast.error((error as Error).message); }
+    finally { setStatusSaving(false); }
+  }
   const selectedTask = tasks.find((t) => t.id === selected);
-  const agents = actors.filter((a) => a.type === 'AGENT');
-  const active = agents.filter((a) => a.status === 'EXECUTING');
   const review = tasks.filter((t) => t.state === 'WAITING_HUMAN');
   const running = tasks.filter((t) => t.state === 'EXECUTING');
   const completed = tasks.filter((t) => t.state === 'DONE');
   const filtered = useMemo(() => {
     let result = tasks.filter(
       (t) =>
+        (view !== 'agent-tasks' || t.is_agent_task) &&
         (!query ||
           `${t.title} ${t.id} ${t.labels.join(' ')}`.toLowerCase().includes(query.toLowerCase())) &&
         (priority === 'ALL' || t.priority === priority) &&
         (filter === 'All tasks' ||
           (filter === 'My approvals' && t.state === 'WAITING_HUMAN') ||
-          (filter === 'Active agents' && t.state === 'EXECUTING') ||
+          (filter === 'Agent tasks' && t.is_agent_task) ||
           (filter === 'GitHub PRs' && t.source_type === 'GITHUB_PR')),
     );
     if (sort) result = [...result].sort((a, b) => a.title.localeCompare(b.title));
     return result;
-  }, [tasks, query, priority, filter, sort]);
+  }, [tasks, query, priority, filter, sort, view]);
   const closeInspector = useCallback(() => setSelected(null), []);
   function navigate(v: string) {
     setView(v);
     setSidebar(false);
     setFilter('All tasks');
+  }
+  function openProject(id: string) {
+    selectProject(id);
+    if (team.current?.id) localStorage.setItem(`nexus-project:${team.current.id}`, id);
+    setView('project');
+    setFilter('All tasks');
+    setSelected(null);
+    setSidebar(false);
   }
   async function action(fn: () => Promise<unknown>, success?: string) {
     setBusy(true);
@@ -192,105 +412,10 @@ export default function Workspace({ user }: { user: SessionUser }) {
     }
   }
   async function approve(task: Task) {
-    if (task.hop_count >= task.max_hops) {
-      setSelected(task.id);
-      await action(
-        () => api(`/tasks/${task.id}`, 'PATCH', { action: 'resume' }),
-        'Execution resumed · circuit breaker reset',
-      );
-    } else
-      await action(
-        () => api(`/tasks/${task.id}`, 'PATCH', { action: 'approve' }),
-        'Task approved. Ready to merge in GitHub.',
-      );
-  }
-  async function simulate(kind: string) {
-    if (simulation) return;
-    setSimulation(kind);
-    try {
-      if (kind === 'ingest') {
-        const n = Date.now().toString().slice(-5);
-        await api('/ingest', 'POST', {
-          title: 'Add streaming responses to the agent SDK',
-          description:
-            'Support incremental agent responses with server-sent events and graceful client reconnection.',
-          source_type: 'GITHUB_PR',
-          source_ref: `nexus/sdk#${n}`,
-          priority: 'MEDIUM',
-          labels: ['sdk', 'enhancement'],
-          context_payload: {
-            repo: 'nexus/sdk',
-            branch: 'feat/streaming-responses',
-            test_command: 'npm test',
-          },
-        });
-        await refresh();
-        toast.success('Pull request ingested');
-        if (actors.some((actor) => actor.handle === '@bot-triage' && actor.status !== 'OFFLINE'))
-          toast('Triage agent picked up the task', {
-            icon: <Avatar actor={actors.find((a) => a.handle === '@bot-triage')} size={20} />,
-          });
-      }
-      if (kind === 'delegate' || kind === 'loop') {
-        const available = agents.filter((actor) => actor.status !== 'OFFLINE');
-        if (available.length < 2) {
-          toast.info('Register at least two online agents to simulate a handoff.');
-          return;
-        }
-        const task = tasks.find(
-          (task) =>
-            task.state !== 'DONE' &&
-            task.hop_count < (kind === 'loop' ? task.max_hops : task.max_hops - 1),
-        );
-        if (!task) {
-          toast.info('Create a task to start another handoff.');
-          return;
-        }
-        let current = task;
-        do {
-          const target = available.find((actor) => actor.id !== current.assignee_id)!;
-          current = await api<Task>(`/tasks/${task.id}/delegate`, 'POST', {
-            target_handle: target.handle,
-            message: `Passing context to ${target.handle} for review.`,
-          });
-          await refresh();
-          if (kind === 'delegate') {
-            toast.success(`Handoff complete → ${target.handle}`, { description: task.id });
-            break;
-          }
-          if (current.hop_count < current.max_hops)
-            await new Promise((resolve) => setTimeout(resolve, 500));
-        } while (current.hop_count < current.max_hops);
-        if (kind === 'loop')
-          toast.warning('Circuit breaker tripped. Human review required.', {
-            description: `${task.id} paused at ${current.hop_count}/${current.max_hops} hops.`,
-          });
-      }
-      if (kind === 'spawn') {
-        if (!workspaceAdmin) {
-          toast.info('Only workspace admins can register agents.');
-          return;
-        }
-        const suffix = Date.now().toString().slice(-6);
-        const parent = agents.find((actor) => actor.handle === '@bot-qa') ?? agents[0];
-        const response = await api<{ actor: Actor; token: string }>('/actors/agents', 'POST', {
-          handle: `@bot-sec-${suffix}`,
-          display_name: `Security scanner ${suffix}`,
-          parent_agent_id: parent?.id ?? null,
-          capabilities: ['security', 'dependency audit'],
-        });
-        await refresh();
-        toast.success(parent ? 'Ephemeral sub-agent is online' : 'New agent is online', {
-          description: parent
-            ? `${response.actor.handle} · spawned by ${parent.handle}`
-            : response.actor.handle,
-        });
-      }
-    } catch (e) {
-      toast.error((e as Error).message);
-    } finally {
-      setSimulation(null);
-    }
+    await action(
+      () => api(`/tasks/${task.id}`, 'PATCH', { action: 'approve' }),
+      'Task approved and completed.',
+    );
   }
   function changeTheme(next: string) {
     setTheme(next);
@@ -350,63 +475,107 @@ export default function Workspace({ user }: { user: SessionUser }) {
           <nav>
             {navItem('overview', 'Overview', LayoutDashboard)}
             {navItem('my-tasks', 'My approvals', CheckCheck, review.length)}
-            {navItem('fleet', 'Agent fleet', Bot, agents.length)}
+            {navItem(
+              'agent-tasks',
+              'Agent queue',
+              Bot,
+              tasks.filter((task) => task.is_agent_task && task.state !== 'DONE').length,
+            )}
             {navItem('activity', 'Activity', Activity)}
-            <div className="nav-caption tools-caption">CONNECT</div>
-            {navItem('integrations', 'Integrations', GitBranch)}
-            <button className="nav-item" onClick={() => setModal('settings')}>
-              <Settings2 size={17} />
-              <span>Members &amp; settings</span>
-            </button>
           </nav>
-          <div className="fleet-mini">
-            <div className="fleet-mini-header">
-              <span>
-                <Radio size={13} /> AGENT FLEET
-              </span>
-              <span className="online-tag">
-                {agents.filter((a) => a.status !== 'OFFLINE').length} online
-              </span>
-            </div>
-            {agents.slice(0, 4).map((a) => (
-              <button className="mini-agent" key={a.id} onClick={() => navigate('fleet')}>
-                <Avatar actor={a} size={27} />
-                <span>
-                  <strong>{a.handle.replace('@', '')}</strong>
-                  <small>
-                    {a.status === 'EXECUTING'
-                      ? 'Working on a task'
-                      : a.status === 'OFFLINE'
-                        ? 'Offline'
-                        : 'Ready for a task'}
-                  </small>
-                </span>
-                <span className={`mini-status ${a.status.toLowerCase()}`} />
+          <div className="sidebar-projects">
+            <div className="sidebar-projects-heading">
+              <button
+                className="sidebar-projects-toggle"
+                aria-expanded={!projectsCollapsed}
+                onClick={() => setProjectsCollapsed((value) => !value)}
+              >
+                {projectsCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                <span className="nav-caption">PROJECTS</span>
               </button>
-            ))}
-            <button className="add-agent" onClick={() => openSpawn()}>
-              <Plus size={13} />
-              Register an agent
-              <ArrowUpRight size={12} />
-            </button>
-          </div>
-          <div className="sidebar-bottom">
-            <button className="support-link" onClick={() => setModal('help')}>
-              <HelpCircle size={16} />
-              <span>Help & shortcuts</span>
-              <Keyboard size={14} />
-            </button>
-            <button className="profile" onClick={() => setModal('settings')}>
-              <Avatar actor={currentActor} size={33} active />
-              <span>
-                <strong>{user.name}</strong>
-                <small>{user.email}</small>
-              </span>
-              <ChevronsUpDown size={14} />
-            </button>
+              <IconButton label="Add project" onClick={() => setModal('projects')}>
+                <Plus size={14} />
+              </IconButton>
+            </div>
+            {!projectsCollapsed && (
+              <div className="sidebar-project-list">
+                {projects.map((item) => {
+                  const projectTasks = allTasks.filter((task) => task.project_id === item.id);
+                  const roots = projectTasks.filter((task) => !task.parent_task_id);
+                  const childrenByParent = new Map<string, Task[]>();
+                  projectTasks.forEach((task) => {
+                    if (!task.parent_task_id) return;
+                    const siblings = childrenByParent.get(task.parent_task_id) ?? [];
+                    siblings.push(task);
+                    childrenByParent.set(task.parent_task_id, siblings);
+                  });
+                  const count = projectTasks.length;
+                  return (
+                    <div key={item.id} className="project-nav-item-wrap">
+                      <div className="project-nav-row">
+                      <button
+                        className={`nav-item project-nav-item ${item.id === project?.id ? 'active' : ''}`}
+                        onClick={() => {
+                          openProject(item.id);
+                          setExpandedProjectId((expanded) =>
+                            expanded === item.id ? null : item.id,
+                          );
+                        }}
+                        title={item.name}
+                        aria-expanded={expandedProjectId === item.id}
+                      >
+                        <FolderKanban size={16} />
+                        <span>{item.name}</span>
+                        <span className="nav-count">{count}</span>
+                        {item.id === project?.id && <span className="nav-active-dot" />}
+                      </button>
+                      <IconButton
+                        label={`Add task to ${item.name}`}
+                        onClick={() => {
+                          openProject(item.id);
+                          setModal('task');
+                        }}
+                      >
+                        <ListPlus size={14} />
+                      </IconButton>
+                      </div>
+                      <AnimatePresence initial={false}>
+                        {expandedProjectId === item.id && (
+                          <motion.div
+                            className="project-task-submenu"
+                            initial={{ height: 0, opacity: 0, y: -5 }}
+                            animate={{ height: 'auto', opacity: 1, y: 0 }}
+                            exit={{ height: 0, opacity: 0, y: -5 }}
+                            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                          >
+                            {roots.length ? (
+                              <div className="project-task-tree">
+                                {renderProjectTaskTree(roots, 0, childrenByParent, expandedProjectTaskIds, (taskId) => {
+                                  setExpandedProjectTaskIds((expanded) =>
+                                    expanded.includes(taskId)
+                                      ? expanded.filter((id) => id !== taskId)
+                                      : [...expanded, taskId],
+                                  );
+                                }, (taskId) => {
+                                  openProject(item.id);
+                                  setSelected(taskId);
+                                })}
+                              </div>
+                            ) : (
+                              <p className="project-task-submenu-empty">No tasks yet</p>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  );
+                })}
+                {!projects.length && <p className="sidebar-project-empty">No projects yet</p>}
+              </div>
+            )}
           </div>
         </aside>
-        <main className="main-workspace">
+        <main className={`main-workspace ${view === 'project' ? 'project-view' : ''}`}>
           <header className="topbar">
             <div className="breadcrumbs">
               <IconButton
@@ -424,10 +593,12 @@ export default function Workspace({ user }: { user: SessionUser }) {
               <strong>
                 {view === 'overview'
                   ? 'Overview'
+                  : view === 'project'
+                    ? (project?.name ?? 'Project')
                   : view === 'my-tasks'
                     ? 'My approvals'
-                    : view === 'fleet'
-                      ? 'Agent fleet'
+                    : view === 'agent-tasks'
+                      ? 'Agent queue'
                       : view === 'activity'
                         ? 'Activity'
                         : 'Integrations'}
@@ -442,74 +613,77 @@ export default function Workspace({ user }: { user: SessionUser }) {
               <IconButton label="Search workspace" onClick={() => setCommandOpen(true)}>
                 <Search size={17} />
               </IconButton>
-              <div className="notification-anchor">
-                <IconButton label="Notifications" onClick={() => setNotifications((v) => !v)}>
-                  <Bell size={17} />
-                  <span className="notification-dot" />
-                </IconButton>
-                <AnimatePresence>
-                  {notifications && (
-                    <motion.div
-                      className="notification-popover"
-                      initial={{ opacity: 0, y: -5 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
-                    >
-                      <h3>
-                        Your inbox<span>{review.length}</span>
-                      </h3>
-                      {review.length ? (
-                        review.map((t) => (
-                          <button
-                            key={t.id}
-                            onClick={() => {
-                              setSelected(t.id);
-                              setNotifications(false);
-                            }}
-                          >
-                            <span className="notification-icon">
-                              <CheckCheck size={16} />
-                            </span>
-                            <span>
-                              <strong>Ready for your review</strong>
-                              <small>{t.title}</small>
-                            </span>
-                            <ArrowUpRight size={13} />
-                          </button>
-                        ))
-                      ) : (
-                        <p>You’re all caught up. Nice work.</p>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-              <Avatar actor={currentActor} size={27} />
-              <Button
-                className="logout-button"
-                onClick={logout}
-                disabled={loggingOut}
-                aria-label="Log out"
+              <Notifications onOpenTask={(task) => {
+                if (task.project_id) {
+                  openProject(task.project_id);
+                  setExpandedProjectId(task.project_id);
+                  setSelected(task.id);
+                }
+              }} onOpenInvitations={() => setModal('workspaces')} />
+            <div className="profile-menu-wrap topbar-profile" ref={profileMenuRef}>
+              <AnimatePresence>
+                {profileMenuOpen && (
+                  <motion.div
+                    className="profile-menu"
+                    role="menu"
+                    initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -6, scale: 0.98 }}
+                    transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                  >
+                    <div className="account-menu-identity"><strong>{user.name}</strong><small>{user.email}</small></div>
+                    <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('workspace-settings'); }}>
+                      <Settings2 size={15} />
+                      <span>Workspace settings</span>
+                    </button>
+                    <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('integrations'); }}>
+                      <GitBranch size={15} />
+                      <span>Integrations</span>
+                    </button>
+                    <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('members-settings'); }}>
+                      <Users size={15} />
+                      <span>Members &amp; settings</span>
+                    </button>
+                    <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('agents'); }}><Bot size={15} /><span>AI agents</span></button>
+                    <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('developer'); }}><KeyRound size={15} /><span>Developer</span></button>
+                    <button role="menuitem" onClick={() => { setProfileMenuOpen(false); setModal('help'); }}><HelpCircle size={15} /><span>Help &amp; shortcuts</span></button>
+                    <div className="profile-menu-divider" />
+                    <button role="menuitem" onClick={() => void logout()} disabled={loggingOut}>
+                      <LogOut size={15} />
+                      <span>{loggingOut ? 'Signing out…' : 'Log out'}</span>
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              <button
+                className="profile topbar-profile-trigger"
+                aria-label="Account menu"
+                aria-haspopup="menu"
+                aria-expanded={profileMenuOpen}
+                onClick={() => setProfileMenuOpen((open) => !open)}
               >
-                <LogOut size={15} />
-                <span>{loggingOut ? 'Signing out…' : 'Log out'}</span>
-              </Button>
+                <Avatar actor={currentActor} size={33} active />
+                <ChevronsUpDown size={14} />
+              </button>
+            </div>
             </div>
           </header>
           <div className="page-content">
-            <div className="page-heading">
+            {view !== 'project' && <div className="page-heading">
               <div>
                 <div className="heading-title">
                   <h1>
-                    {view === 'fleet'
-                      ? 'Meet your extended team.'
+                    {view === 'project'
+                      ? (project?.name ?? 'Project tasks')
+                      : view === 'agent-tasks'
+                      ? 'Work ready for external workers.'
                       : view === 'activity'
                         ? 'Every move, in the open.'
                         : view === 'integrations'
                           ? 'Bring your work together.'
                           : view === 'my-tasks'
                             ? 'Your judgment. Their momentum.'
-                            : 'Human ingenuity. Agent velocity.'}
+                            : 'Projects that keep work moving.'}
                   </h1>
                   <span className="workspace-badge">
                     <span />
@@ -517,26 +691,30 @@ export default function Workspace({ user }: { user: SessionUser }) {
                   </span>
                 </div>
                 <p>
-                  {view === 'fleet'
-                    ? 'Specialized agents. Shared context. A team that scales with you.'
+                  {view === 'project'
+                    ? 'Tasks and subtasks in this project.'
+                    : view === 'agent-tasks'
+                    ? 'Tasks are claimed by third-party workers using their agent key.'
                     : view === 'activity'
-                      ? 'One continuous timeline of humans and agents moving work forward.'
+                      ? 'One timeline of people and external workers moving work forward.'
                       : view === 'integrations'
                         ? 'Turn issues, pull requests, and support tickets into coordinated action.'
                         : view === 'my-tasks'
                           ? 'A little human oversight goes a long way. Here’s what needs your attention.'
-                          : 'Your tasks. Your agents. One workspace.'}
+                          : 'Your projects. Your tasks. One workspace.'}
                 </p>
               </div>
               <Button
                 className="primary new-task"
-                onClick={() => (view === 'fleet' ? openSpawn() : setModal('task'))}
+                onClick={() => setModal('task')}
+                disabled={!project}
+                title={!project ? 'Create a project before adding tasks' : undefined}
               >
                 <Plus size={16} />
-                {view === 'fleet' ? 'Spawn agent' : 'Create task'}
+                Create task
                 <kbd>N</kbd>
               </Button>
-            </div>
+            </div>}
             {error && (
               <div className="error-banner">
                 <ShieldAlert size={16} />
@@ -552,7 +730,111 @@ export default function Workspace({ user }: { user: SessionUser }) {
                 </Button>
               </div>
             )}
-            {(view === 'overview' || view === 'my-tasks') && (
+            {view === 'project' && (
+              <TaskOrderProvider><section className="project-work-list" aria-label={`${project?.name ?? 'Project'} tasks`}>
+                <div className="project-view-tabs">
+                  <button className="active"><List size={14} />List</button>
+                  <button onClick={() => { setLayout('board'); setView('overview'); }}><LayoutGrid size={14} />Board</button>
+                  <button onClick={() => navigate('activity')}><Activity size={14} />Activity</button>
+                </div>
+                <div className="project-list-toolbar">
+                  <span className="project-grouping"><Layers size={13} />Status</span>
+                  <div className="project-list-actions">
+                    <Button onClick={() => setCommandOpen(true)} aria-label="Search tasks"><Search size={16} /></Button>
+                    <Button onClick={() => setModal('workspace-settings')} aria-label="Workspace settings"><Settings2 size={15} /></Button>
+                    <Button className="project-create-task" onClick={() => setModal('task')} disabled={!project}><Plus size={14} />Task</Button>
+                  </div>
+                </div>
+                {project ? (
+                  <div className="project-groups">
+                    {[
+                      { label: 'Todo', states: ['TRIAGE', 'QUEUED'], color: 'todo' },
+                      { label: 'Progress', states: ['EXECUTING'], color: 'progress' },
+                      { label: 'Testing', states: ['WAITING_HUMAN', 'BLOCKED'], color: 'review' },
+                      { label: 'Done', states: ['DONE'], color: 'done' },
+                    ].map((group) => {
+                      const roots = tasks.filter(
+                        (task) => !task.parent_task_id && group.states.includes(task.state),
+                      );
+                      const childrenByParent = new Map<string, Task[]>();
+                      tasks.forEach((task) => {
+                        if (!task.parent_task_id) return;
+                        const children = childrenByParent.get(task.parent_task_id) ?? [];
+                        children.push(task);
+                        childrenByParent.set(task.parent_task_id, children);
+                      });
+                      const countTree = (task: Task): number =>
+                        1 + (childrenByParent.get(task.id) ?? []).reduce((sum, child) => sum + countTree(child), 0);
+                      const count = roots.reduce((sum, task) => sum + countTree(task), 0);
+                      if (!count) return null;
+                      const expanded = !collapsedProjectGroups.includes(group.label);
+                      return (
+                        <section className="project-status-group" key={group.label}>
+                          <button
+                            className="project-status-heading"
+                            aria-expanded={expanded}
+                            onClick={() => setCollapsedProjectGroups((groups) =>
+                              groups.includes(group.label)
+                                ? groups.filter((label) => label !== group.label)
+                                : [...groups, group.label],
+                            )}
+                          >
+                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            <span className={`project-status-pill ${group.color}`}><CircleDot size={13} />{group.label}</span>
+                            <span className="project-status-count">{count}</span>
+                          </button>
+                          {expanded && <div className="project-table-wrap">
+                            <div className="project-table-header">
+                              <span>Name</span>
+                              <span>Assignee</span>
+                              <span>Priority</span>
+                              <span>Due date</span>
+                              <span>Start date</span>
+                              <span>Phases</span>
+                              <span>Completion</span>
+                              <span />
+                            </div>
+                            {roots.length ? (
+                              <div className="project-table-body">
+                                {renderProjectTableRows(
+                                  roots,
+                                  0,
+                                  childrenByParent,
+                                  expandedProjectTaskIds,
+                                  actors,
+                                  (taskId) => setExpandedProjectTaskIds((expanded) =>
+                                    expanded.includes(taskId)
+                                      ? expanded.filter((id) => id !== taskId)
+                                      : [...expanded, taskId],
+                                  ),
+                                  (taskId) => setSelected(taskId),
+                                  (taskId) => setSubtaskParent(taskId),
+                                  (task, bounds) => {
+                                    if (statusSaving) return;
+                                    setStatusMenu({ taskId: task.id, x: Math.min(bounds.left, window.innerWidth - 190), y: Math.min(bounds.bottom + 7, window.innerHeight - 220) });
+                                    const next = taskStatuses[Math.min(taskStatusIndex(task.state) + 1, taskStatuses.length - 1)].state;
+                                    if (next !== task.state) void updateTaskStatus(task.id, next);
+                                  },
+                                )}
+                              </div>
+                            ) : (
+                              <p className="project-table-empty">No tasks in this group</p>
+                            )}
+                            <button className="project-group-add" onClick={() => setModal('task')}><Plus size={14} />Add Task</button>
+                          </div>}
+                        </section>
+                      );
+                    })}
+                    {!tasks.length && (
+                      <EmptyState title="No tasks yet" description="Create a task to start this project." />
+                    )}
+                  </div>
+                ) : (
+                  <EmptyState title="Select a project" description="Choose a project from the sidebar." />
+                )}
+              </section></TaskOrderProvider>
+            )}
+            {(view === 'overview' || view === 'my-tasks' || view === 'agent-tasks') && (
               <>
                 <section className="overview-stats" aria-label="Workspace summary">
                   <div className="stat">
@@ -564,7 +846,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                       {String(tasks.filter((t) => t.state !== 'DONE').length).padStart(2, '0')}
                       <span className="stat-change">
                         <span className="little-dot" />
-                        Across your workspace
+                        In this project
                       </span>
                     </div>
                     <div className="stat-track">
@@ -584,19 +866,16 @@ export default function Workspace({ user }: { user: SessionUser }) {
                   <div className="stat">
                     <div className="stat-label">
                       <Bot size={15} />
-                      Agents at work
+                      Agent tasks
                     </div>
                     <div className="stat-value">
-                      {String(active.length).padStart(2, '0')}
-                      <span className="stat-avatars">
-                        {active.map((a) => (
-                          <Avatar key={a.id} actor={a} size={25} />
-                        ))}
-                      </span>
+                      {String(
+                        tasks.filter((task) => task.is_agent_task && task.state !== 'DONE').length,
+                      ).padStart(2, '0')}
                     </div>
                     <p>
                       <span className="status-dot executing" />
-                      {agents.length - active.length} more ready when you are
+                      Flagged for external workers
                     </p>
                   </div>
                   <button
@@ -622,7 +901,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                   <div className="stat guardrail-stat">
                     <div className="stat-label">
                       <ShieldCheck size={15} />
-                      Autonomy with guardrails
+                      Clear project ownership
                     </div>
                     <div className="guardrail-title">
                       <span className="guardrail-icon">
@@ -630,7 +909,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                       </span>
                       <strong>You’re in control.</strong>
                     </div>
-                    <p>4-hop limit. Human approval. Always.</p>
+                    <p>Tasks stay scoped to the selected project.</p>
                   </div>
                 </section>
                 <div className="workspace-tabs">
@@ -645,9 +924,15 @@ export default function Workspace({ user }: { user: SessionUser }) {
                       <LayoutGrid size={15} />
                       Task board<span>{tasks.length}</span>
                     </button>
-                    <button onClick={() => navigate('fleet')}>
+                    <button
+                      onClick={() => navigate('agent-tasks')}
+                      className={view === 'agent-tasks' ? 'active' : ''}
+                    >
                       <Bot size={16} />
-                      Agent fleet<span>{agents.length}</span>
+                      Agent queue
+                      <span>
+                        {tasks.filter((task) => task.is_agent_task && task.state !== 'DONE').length}
+                      </span>
                     </button>
                     <button onClick={() => navigate('activity')}>
                       <Activity size={15} />
@@ -705,7 +990,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                       {filterMenu && (
                         <div className="small-popover">
                           <span className="popover-label">PRIORITY</span>
-                          {['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map((p) => (
+                          {['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NONE'].map((p) => (
                             <button
                               key={p}
                               onClick={() => {
@@ -718,7 +1003,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                               ) : (
                                 <PriorityIcon priority={p as Task['priority']} />
                               )}
-                              <span>{p === 'ALL' ? 'All priorities' : p.toLowerCase()}</span>
+                              <span>{p === 'ALL' ? 'All priorities' : priorityLabel(p as Task['priority'])}</span>
                               {priority === p && <Check size={13} />}
                             </button>
                           ))}
@@ -788,8 +1073,9 @@ export default function Workspace({ user }: { user: SessionUser }) {
                           ).filter((t) =>
                             col.state === 'WAITING_HUMAN'
                               ? ['WAITING_HUMAN', 'BLOCKED'].includes(t.state)
-                              : t.state === col.state,
+                              : col.state === 'TRIAGE' ? ['TRIAGE', 'QUEUED'].includes(t.state) : t.state === col.state,
                           );
+                          const rootTasks = colTasks.filter((task) => !task.parent_task_id);
                           return (
                             <section
                               className={`kanban-column column-${col.className}`}
@@ -810,31 +1096,60 @@ export default function Workspace({ user }: { user: SessionUser }) {
                                 <IconButton
                                   label={`Add a task to the workspace from ${col.label}`}
                                   onClick={() => setModal('task')}
+                                  disabled={!project}
                                 >
                                   <Plus size={14} />
                                 </IconButton>
                               </div>
                               <div className="column-cards">
                                 <AnimatePresence initial={false}>
-                                  {colTasks.map((task) => (
-                                    <TaskCard
-                                      key={task.id}
-                                      task={task}
-                                      actors={actors}
-                                      eventCount={
-                                        events.filter(
-                                          (e) =>
-                                            e.task_id === task.id && e.event_type === 'COMMENT',
-                                        ).length
-                                      }
-                                      onOpen={() => setSelected(task.id)}
-                                      onApprove={() =>
-                                        task.hop_count >= 4 ? setSelected(task.id) : approve(task)
-                                      }
-                                      busy={busy}
-                                      compact={compact}
-                                    />
-                                  ))}
+                                  {rootTasks.map((task) => {
+                                    const children = tasks.filter(
+                                      (child) => child.parent_task_id === task.id,
+                                    );
+                                    return (
+                                      <div className="task-group-item" key={task.id}>
+                                        <TaskCard
+                                          task={task}
+                                          eventCount={
+                                            events.filter(
+                                              (e) =>
+                                                e.task_id === task.id && e.event_type === 'COMMENT',
+                                            ).length
+                                          }
+                                          onOpen={() => setSelected(task.id)}
+                                          onApprove={() => approve(task)}
+                                          busy={busy}
+                                          compact={compact}
+                                        />
+                                        {children.length > 0 && (
+                                          <div className="task-group-subtasks">
+                                            {children.map((child) => (
+                                              <TaskCard
+                                                key={child.id}
+                                                task={child}
+                                                eventCount={events.filter(
+                                                  (e) =>
+                                                    e.task_id === child.id &&
+                                                    e.event_type === 'COMMENT',
+                                                ).length}
+                                                onOpen={() => setSelected(child.id)}
+                                                onApprove={() => approve(child)}
+                                                busy={busy}
+                                                compact
+                                              />
+                                            ))}
+                                          </div>
+                                        )}
+                                        <button
+                                          className="group-add-subtask"
+                                          onClick={() => setSubtaskParent(task.id)}
+                                        >
+                                          <Plus size={12} /> Add subtask
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
                                 </AnimatePresence>
                                 {!colTasks.length && (
                                   <div
@@ -864,7 +1179,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                                     )}
                                   </div>
                                 )}
-                                <button className="column-add" onClick={() => setModal('task')}>
+                                <button className="column-add" onClick={() => setModal('task')} disabled={!project}>
                                   <Plus size={13} />
                                   Add task
                                 </button>
@@ -878,9 +1193,9 @@ export default function Workspace({ user }: { user: SessionUser }) {
                         <div className="list-header">
                           <span>Task</span>
                           <span>Status</span>
-                          <span>Assignee</span>
+                          <span>Queue</span>
                           <span>Priority</span>
-                          <span>Hops</span>
+                          <span>Subtasks</span>
                         </div>
                         {filtered.length ? (
                           filtered.map((t) => (
@@ -896,18 +1211,14 @@ export default function Workspace({ user }: { user: SessionUser }) {
                               <span className={`state-tag state-${t.state.toLowerCase()}`}>
                                 {t.state.toLowerCase().replaceAll('_', ' ')}
                               </span>
-                              <span>
-                                <Avatar
-                                  actor={actors.find((a) => a.id === t.assignee_id)}
-                                  size={23}
-                                />
-                                {actors.find((a) => a.id === t.assignee_id)?.handle}
-                              </span>
+                              <span>{t.is_agent_task ? t.agent_key : 'Human task'}</span>
                               <span>
                                 <PriorityIcon priority={t.priority} />
-                                {t.priority.toLowerCase()}
+                                {priorityLabel(t.priority)}
                               </span>
-                              <span className="mono">{t.hop_count}/4</span>
+                              <span className="mono">
+                                {tasks.filter((child) => child.parent_task_id === t.id).length}
+                              </span>
                             </button>
                           ))
                         ) : (
@@ -928,16 +1239,16 @@ export default function Workspace({ user }: { user: SessionUser }) {
                     </span>
                     <span className="pulse-divider" />
                     <div className="pulse-avatars">
-                      {agents.slice(0, 3).map((a) => (
-                        <Avatar key={a.id} actor={a} size={20} />
-                      ))}
+                      {project && (
+                        <span className="project-pulse-mark">
+                          {project.name.slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
                     </div>
                     <span>
-                      {simulation
-                        ? 'Your agents are making moves…'
-                        : completed.length
-                          ? `${completed.length} task${completed.length > 1 ? 's' : ''} shipped. Keep the momentum going.`
-                          : 'Your humans and agents are on the same page.'}
+                      {completed.length
+                        ? `${completed.length} task${completed.length > 1 ? 's' : ''} shipped. Keep the momentum going.`
+                        : 'Project activity is up to date.'}
                     </span>
                     <span className="pulse-live">
                       <span className="breathing-dot" />
@@ -957,123 +1268,10 @@ export default function Workspace({ user }: { user: SessionUser }) {
                 </div>
               </>
             )}
-            {view === 'fleet' && (
-              <section className="fleet-page">
-                <div className="section-toolbar">
-                  <div>
-                    <span className="status-dot executing" />
-                    {agents.filter((a) => a.status !== 'OFFLINE').length} agents online{' '}
-                    <span className="subtle">/ {agents.length} registered</span>
-                  </div>
-                  <Button onClick={() => openSpawn()}>
-                    <Terminal size={14} />
-                    Register via API
-                    <ArrowUpRight size={13} />
-                  </Button>
-                </div>
-                <div className="fleet-grid">
-                  {agents.map((a, i) => (
-                    <motion.article
-                      className="fleet-card"
-                      key={a.id}
-                      initial={{ opacity: 0, y: 12 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: i * 0.05 }}
-                    >
-                      <div className="fleet-card-top">
-                        <Avatar actor={a} size={43} active={a.status === 'EXECUTING'} />
-                        <span className={`agent-state ${a.status.toLowerCase()}`}>
-                          <i />
-                          {a.status === 'EXECUTING'
-                            ? 'Executing'
-                            : a.status === 'IDLE'
-                              ? 'Available'
-                              : 'Offline'}
-                        </span>
-                      </div>
-                      <h3>{a.display_name}</h3>
-                      <span className="fleet-handle mono">{a.handle}</span>
-                      <div className="fleet-capabilities">
-                        {a.capabilities.map((c) => (
-                          <span key={c}>{c}</span>
-                        ))}
-                      </div>
-                      {a.parent_agent_id ? (
-                        <div className="parent-agent">
-                          <GitBranch size={13} />
-                          <span>
-                            Spawned by{' '}
-                            <strong>
-                              {actors.find((p) => p.id === a.parent_agent_id)?.handle}
-                            </strong>
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="parent-agent">
-                          <Bot size={13} />
-                          Core workspace agent
-                        </div>
-                      )}
-                      <div className="fleet-card-footer">
-                        <span>
-                          {tasks.filter((t) => t.assignee_id === a.id && t.state !== 'DONE').length}{' '}
-                          assigned tasks
-                        </span>
-                        <button
-                          className={`switch ${a.status !== 'OFFLINE' ? 'on' : ''}`}
-                          role="switch"
-                          aria-label={`Toggle ${a.handle} online`}
-                          aria-checked={a.status !== 'OFFLINE'}
-                          disabled={busy}
-                          onClick={() =>
-                            action(
-                              () =>
-                                api(`/actors/${a.id}`, 'PATCH', {
-                                  status: a.status === 'OFFLINE' ? 'IDLE' : 'OFFLINE',
-                                }),
-                              `${a.handle} ${a.status === 'OFFLINE' ? 'is online' : 'paused'}`,
-                            )
-                          }
-                        />
-                      </div>
-                    </motion.article>
-                  ))}
-                  <button className="spawn-card" onClick={() => openSpawn()}>
-                    <span>
-                      <Plus size={24} />
-                    </span>
-                    <strong>Make room for one more.</strong>
-                    <p>
-                      Give your team a new capability.
-                      <br />
-                      Spawn a specialized agent.
-                    </p>
-                    <span className="spawn-card-link">
-                      Spawn agent
-                      <ArrowRight size={14} />
-                    </span>
-                  </button>
-                </div>
-                <div className="fleet-info">
-                  <GitBranch size={19} />
-                  <div>
-                    <strong>Small agents. Shared intelligence.</strong>
-                    <p>
-                      Agents can spawn specialized sub-agents, pass context, and delegate work.
-                      Every handoff is recorded. Every chain has a limit.
-                    </p>
-                  </div>
-                  <span className="guardrail-chip">
-                    <ShieldCheck size={14} />
-                    4-hop circuit breaker
-                  </span>
-                </div>
-              </section>
-            )}
             {view === 'activity' && (
               <section className="activity-page">
                 <div className="section-toolbar">
-                  <span>{events.length} workspace events</span>
+                  <span>{events.length} project events</span>
                   <span className="live-indicator">
                     <span className="breathing-dot" />
                     Updating live
@@ -1123,7 +1321,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                   <h2>Your stack. One source of truth.</h2>
                   <p>
                     Webhook-first ingestion keeps your existing tools connected to the people and
-                    agents doing the work.
+                    external workers doing the work.
                   </p>
                 </div>
                 <div className="integration-grid">
@@ -1165,95 +1363,10 @@ export default function Workspace({ user }: { user: SessionUser }) {
               </section>
             )}
           </div>
-          <AnimatePresence>
-            {dockOpen ? (
-              <motion.div
-                className="simulator-dock"
-                initial={{ y: 50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: 50, opacity: 0 }}
-                transition={{ delay: 0.25, type: 'spring', stiffness: 300, damping: 28 }}
-              >
-                <div className="dock-label">
-                  <span className="dock-orb">
-                    <Zap size={17} />
-                  </span>
-                  <div>
-                    <strong>Take it for a spin</strong>
-                    <span>LIVE AGENT SIMULATOR</span>
-                  </div>
-                </div>
-                <div className="dock-divider" />
-                <div className="dock-actions">
-                  {[
-                    {
-                      id: 'ingest',
-                      label: 'Ingest a PR',
-                      Icon: GitPullRequest,
-                      title: 'Simulate GitHub PR ingest',
-                    },
-                    {
-                      id: 'delegate',
-                      label: 'Trigger handoff',
-                      Icon: ArrowRight,
-                      title: 'Delegate from coder to QA',
-                    },
-                    {
-                      id: 'loop',
-                      label: 'Test the guardrails',
-                      Icon: ShieldCheck,
-                      title: 'Simulate infinite loop and trip the circuit breaker',
-                    },
-                    {
-                      id: 'spawn',
-                      label: agents.length ? 'Spawn sub-agent' : 'Spawn agent',
-                      Icon: Bot,
-                      title: 'Spawn an ephemeral agent via API',
-                    },
-                  ].map((s) => (
-                    <Button
-                      key={s.id}
-                      className={`dock-action ${simulation === s.id ? 'simulating' : ''}`}
-                      disabled={!!simulation || !loaded}
-                      title={s.title}
-                      onClick={() => simulate(s.id)}
-                    >
-                      {simulation === s.id ? (
-                        <LoaderCircle className="spin" size={15} />
-                      ) : (
-                        <s.Icon size={15} />
-                      )}
-                      <span>{s.label}</span>
-                    </Button>
-                  ))}
-                </div>
-                <IconButton
-                  label="Minimize simulator"
-                  className="dock-close"
-                  onClick={() => setDockOpen(false)}
-                >
-                  <X size={13} />
-                </IconButton>
-                <span className="dock-shortcut">DEMO</span>
-              </motion.div>
-            ) : (
-              <motion.button
-                className="reopen-dock"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                onClick={() => setDockOpen(true)}
-              >
-                <Zap size={15} />
-                Open simulator
-              </motion.button>
-            )}
-          </AnimatePresence>
           <footer className="app-statusbar">
             <span>
               <span className="status-dot executing" />
               Connected
-              <span className="statusbar-divider" />
-              {agents.length} agents
               <span className="statusbar-divider" />
               {tasks.length} tasks
             </span>
@@ -1265,6 +1378,16 @@ export default function Workspace({ user }: { user: SessionUser }) {
             </span>
           </footer>
         </main>
+        {statusMenu && (
+          <div data-status-picker className="task-status-menu" role="menu" aria-label="Task status" style={{ left: statusMenu.x, top: statusMenu.y }}>
+            <span className="task-status-menu-label">Status</span>
+            {taskStatuses.map((status) => {
+              const current = allTasks.find((task) => task.id === statusMenu.taskId);
+              const active = current && taskStatusIndex(current.state) === taskStatusIndex(status.state);
+              return <button key={status.state} role="menuitemradio" aria-checked={Boolean(active)} disabled={statusSaving} onClick={() => { void updateTaskStatus(statusMenu.taskId, status.state); setStatusMenu(null); }}><span className={`project-status-pill ${status.color}`}><CircleDot size={13} />{status.label}</span>{active && <Check size={14} />}</button>;
+            })}
+          </div>
+        )}
         <AnimatePresence>
           {selectedTask && (
             <Inspector
@@ -1277,25 +1400,30 @@ export default function Workspace({ user }: { user: SessionUser }) {
           )}
         </AnimatePresence>
         <AnimatePresence>
-          {modal === 'task' && (
+          {modal === 'task' && project && (
             <CreateTask
+              project={project}
               onClose={() => setModal(null)}
-              triageActor={actors.find(
-                (actor) =>
-                  actor.handle === '@bot-triage' &&
-                  actor.type === 'AGENT' &&
-                  actor.status !== 'OFFLINE',
-              )}
               onCreated={async () => {
                 await refresh();
                 setModal(null);
-                toast.success('Task created. Your team can take it from here.');
+                toast.success('Task added to the project.');
               }}
             />
           )}
-          {modal === 'spawn' && workspaceAdmin && (
-            <SpawnAgent actors={actors} onClose={() => setModal(null)} refresh={refresh} />
-          )}{' '}
+          {subtaskParent && project && (
+            <CreateTask
+              project={project}
+              parentTaskId={subtaskParent}
+              onClose={() => setSubtaskParent(null)}
+              onCreated={async () => {
+                await refresh();
+                setSubtaskParent(null);
+                toast.success('Subtask added to the task group.');
+              }}
+            />
+          )}
+          {modal === 'projects' && <ProjectManager onClose={() => setModal(null)} />}
           {modal === 'help' && (
             <Modal
               title="A workspace that moves with you."
@@ -1316,43 +1444,21 @@ export default function Workspace({ user }: { user: SessionUser }) {
                   </div>
                 ))}
                 <p>
-                  Try the simulator dock to ingest a pull request, hand off work, test the
-                  delegation circuit breaker, or spawn a sub-agent.
+                  Create a task in the selected project or connect an integration to ingest work.
                 </p>
-                <Button
-                  className="primary"
-                  onClick={() => {
-                    setModal(null);
-                    setDockOpen(true);
-                  }}
-                >
-                  Explore the simulator
-                  <Zap size={14} />
-                </Button>
               </div>
             </Modal>
           )}
           {modal === 'workspaces' && (
             <WorkspacePicker onClose={() => setModal(null)} onSwitch={selectWorkspace} />
           )}
-          {modal === 'settings' && (
+          {modal === 'workspace-settings' && (
             <Modal
               title="Workspace settings"
-              subtitle="A place for your people and your agents."
+              subtitle="Manage this workspace and its projects."
               onClose={() => setModal(null)}
             >
               <div className="settings-content">
-                <WorkspaceTeam user={user} />
-                <div>
-                  <label>Signed in as</label>
-                  <strong>{user.name}</strong>
-                  <span className="subtle">{user.email}</span>
-                  <span className="subtle mono">Integration workspace: {team.current?.id}</span>
-                  <Button onClick={logout} disabled={loggingOut}>
-                    <LogOut size={14} />
-                    Log out
-                  </Button>
-                </div>
                 <div>
                   <label>Workspace</label>
                   <strong>{team.current?.name}</strong>
@@ -1379,11 +1485,9 @@ export default function Workspace({ user }: { user: SessionUser }) {
                   </div>
                 </div>
                 <div>
-                  <label>Delegation guardrails</label>
-                  <strong>4 hops · Human approval required</strong>
-                  <span className="subtle">
-                    The circuit breaker pauses execution before a delegation chain can loop.
-                  </span>
+                  <label>Projects</label>
+                  <strong>{projects.length} in this workspace</strong>
+                  <Button onClick={() => setModal('projects')}>Manage projects</Button>
                 </div>
                 <div>
                   <label>Storage</label>
@@ -1399,6 +1503,28 @@ export default function Workspace({ user }: { user: SessionUser }) {
               </div>
             </Modal>
           )}
+          {modal === 'agents' && <AgentSettings key={team.current?.id} onClose={() => setModal(null)} />}
+          {modal === 'developer' && <DeveloperSettings key={team.current?.id} onClose={() => setModal(null)} />}
+          {modal === 'members-settings' && (
+            <Modal
+              title="Members & settings"
+              subtitle="Manage workspace access and your account."
+              onClose={() => setModal(null)}
+            >
+              <div className="settings-content">
+                <WorkspaceTeam user={user} />
+                <div>
+                  <label>Signed in as</label>
+                  <strong>{user.name}</strong>
+                  <span className="subtle">{user.email}</span>
+                  <Button onClick={logout} disabled={loggingOut}>
+                    <LogOut size={14} />
+                    Log out
+                  </Button>
+                </div>
+              </div>
+            </Modal>
+          )}
           {modal === 'integrations' && <IntegrationSetup onClose={() => setModal(null)} />}
         </AnimatePresence>
         <AnimatePresence>
@@ -1408,7 +1534,7 @@ export default function Workspace({ user }: { user: SessionUser }) {
                 <Search size={19} />
                 <input
                   autoFocus
-                  placeholder="Search tasks, agents, or actions…"
+                  placeholder="Search tasks or actions…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   aria-label="Search workspace"
@@ -1433,27 +1559,6 @@ export default function Workspace({ user }: { user: SessionUser }) {
                     <ArrowUpRight size={14} />
                   </button>
                 ))}
-                {agents
-                  .filter((a) =>
-                    `${a.handle} ${a.display_name}`.toLowerCase().includes(query.toLowerCase()),
-                  )
-                  .map((a) => (
-                    <button
-                      key={a.id}
-                      onClick={() => {
-                        navigate('fleet');
-                        setCommandOpen(false);
-                        setQuery('');
-                      }}
-                    >
-                      <Avatar actor={a} />
-                      <span>
-                        <strong>{a.display_name}</strong>
-                        <small>{a.handle}</small>
-                      </span>
-                      <ArrowUpRight size={14} />
-                    </button>
-                  ))}
                 {!query && (
                   <button
                     onClick={() => {
@@ -1466,15 +1571,12 @@ export default function Workspace({ user }: { user: SessionUser }) {
                     <kbd>N</kbd>
                   </button>
                 )}
-                {!filtered.length &&
-                  !agents.some((a) =>
-                    `${a.handle} ${a.display_name}`.toLowerCase().includes(query.toLowerCase()),
-                  ) && (
-                    <EmptyState
-                      title="No matches yet"
-                      description="Try another task title or agent handle."
-                    />
-                  )}
+                {!filtered.length && (
+                  <EmptyState
+                    title="No matches yet"
+                    description="Try another task title or agent handle."
+                  />
+                )}
               </div>
             </Modal>
           )}

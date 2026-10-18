@@ -2,6 +2,8 @@
 import type { Actor, Priority } from '@/lib/types';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
+  Flag,
+  Ban,
   AlertTriangle,
   ArrowUp,
   Bot,
@@ -35,16 +37,19 @@ export function IconButton({
   label,
   onClick,
   className = '',
+  disabled = false,
 }: {
   children: ReactNode;
   label: string;
   onClick?: () => void;
   className?: string;
+  disabled?: boolean;
 }) {
   return (
     <Button
       className={`icon-button ${className}`}
       onClick={onClick}
+      disabled={disabled}
       aria-label={label}
       title={label}
     >
@@ -86,7 +91,9 @@ export function Avatar({
       style={{ width: size, height: size, flexShrink: 0 }}
       title={actor?.handle}
     >
-      {actor?.type === 'HUMAN' ? (
+      {actor?.avatar_url ? (
+        <img src={actor.avatar_url} alt="" className="avatar-image" />
+      ) : actor?.type === 'HUMAN' ? (
         <span className="human-initials">
           {actor.display_name
             .split(/\s+/)
@@ -104,15 +111,8 @@ export function Avatar({
   );
 }
 export function PriorityIcon({ priority }: { priority: Priority }) {
-  const Icon =
-    priority === 'CRITICAL'
-      ? AlertTriangle
-      : priority === 'HIGH'
-        ? SignalHigh
-        : priority === 'MEDIUM'
-          ? SignalMedium
-          : SignalLow;
-  return <Icon size={14} className={`priority-${priority.toLowerCase()}`} />;
+  const Icon = priority === 'NONE' ? Ban : Flag;
+  return <Icon size={14} fill={priority === 'NONE' ? 'none' : 'currentColor'} className={`priority-${priority.toLowerCase()}`} />;
 }
 export function Modal({
   children,
@@ -155,7 +155,10 @@ export function Modal({
         exit={{ opacity: 0, y: 10 }}
         transition={{ type: 'spring', stiffness: 400, damping: 30 }}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') onClose();
+          if (e.key === 'Escape') {
+            e.stopPropagation();
+            onClose();
+          }
           if (e.key === 'Tab') {
             const items = dialog.current?.querySelectorAll<HTMLElement>(
               'button:not(:disabled),input,textarea,select,a[href]',

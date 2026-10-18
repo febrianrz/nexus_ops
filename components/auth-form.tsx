@@ -84,14 +84,14 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
             In good hands.
           </h1>
           <p>
-            Human ingenuity. Agent velocity.
+            Human work. External worker queues.
             <br />
-            One workspace to move forward, together.
+            One project workspace to move forward.
           </p>
-          <div className="auth-relay" aria-label="Agents collaborate, humans stay in control">
+          <div className="auth-relay" aria-label="Projects route tasks to workers and human review">
             <span className="auth-agent">
               <Terminal size={16} />
-              <span>Coder</span>
+              <span>Project</span>
             </span>
             <motion.span
               initial={{ opacity: 0.4 }}
@@ -102,7 +102,7 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
             </motion.span>
             <span className="auth-agent qa">
               <Bot size={16} />
-              <span>QA</span>
+              <span>Worker queue</span>
             </span>
             <ArrowRight size={18} />
             <span className="auth-human">
@@ -274,7 +274,7 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
           </form>
           <div className="auth-form-footer">
             <LockKeyhole size={12} />
-            <span>Your people. Your agents. Your workspace.</span>
+            <span>Your people. Your projects. Your workspace.</span>
           </div>
         </motion.section>
         <footer className="auth-main-footer">

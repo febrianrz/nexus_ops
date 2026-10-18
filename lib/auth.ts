@@ -4,6 +4,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import type { NextRequest, NextResponse } from 'next/server';
 import { database } from './database';
 import { ProtocolError } from './protocol';
+import { prepareDeveloperKey } from './developer-key-auth';
 import type { SessionUser } from './auth-types';
 
 export const SESSION_COOKIE = 'nexus_session';
@@ -35,7 +36,11 @@ export function assertSameOrigin(req: NextRequest) {
 }
 
 export async function prepareAuthentication(req: NextRequest) {
-  if (req.headers.has('authorization')) return;
+  if (req.headers.has('authorization')) {
+    const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+    if (token.startsWith('nxo_')) await prepareDeveloperKey(req, token);
+    return;
+  }
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return;
   if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) assertSameOrigin(req);

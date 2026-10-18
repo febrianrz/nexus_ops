@@ -5,11 +5,14 @@ import { hashKey } from './api';
 import { membership, workspaceRoles } from './workspace-access';
 import { requestUser } from './auth';
 import { database } from './database';
+import { developerKeyIdentity } from './developer-key-auth';
 import { ProtocolError } from './protocol';
 import { transact } from './store';
 import type { Workspace } from './types';
 
 export async function requestOwner(req: NextRequest): Promise<string | null> {
+  const managed = developerKeyIdentity(req);
+  if (managed) return managed.workspaceId;
   const token = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (token) {
     if (
@@ -25,6 +28,22 @@ export async function requestOwner(req: NextRequest): Promise<string | null> {
           .where(eq(workspaces.id, owner))
           .limit(1);
         if (!account) throw new ProtocolError('Workspace not found', 404);
+      }
+      return owner;
+    }
+    if (
+      (process.env.NEXUS_WORKER_TOKEN ?? process.env.NEXUS_ADMIN_TOKEN) &&
+      hashKey(token) === hashKey(process.env.NEXUS_WORKER_TOKEN ?? process.env.NEXUS_ADMIN_TOKEN!)
+    ) {
+      const owner = req.headers.get('x-nexus-workspace');
+      if (!owner) throw new ProtocolError('X-Nexus-Workspace is required for worker requests', 400);
+      if (process.env.DATABASE_URL) {
+        const [workspace] = await database()
+          .select({ id: workspaces.id })
+          .from(workspaces)
+          .where(eq(workspaces.id, owner))
+          .limit(1);
+        if (!workspace) throw new ProtocolError('Workspace not found', 404);
       }
       return owner;
     }

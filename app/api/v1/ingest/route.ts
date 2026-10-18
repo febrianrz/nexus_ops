@@ -4,6 +4,7 @@ import { transactForRequest as transact } from '@/lib/workspace-scope';
 import { NextRequest } from 'next/server';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { planningContextInput } from '@/lib/task-planning-input';
 const sourceUrl = z.url().regex(/^https?:\/\//);
 const githubItem = z.object({
   number: z.number().int().positive(),
@@ -26,9 +27,20 @@ const input = z
     source_type: z.enum(['TICKET', 'GITHUB_ISSUE', 'GITHUB_PR', 'MANUAL']),
     source_ref: z.string().min(1).max(200),
     source_url: sourceUrl.nullable().optional(),
-    priority: z.enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']).default('MEDIUM'),
-    context_payload: z.record(z.string(), z.unknown()).default({}),
+    priority: z.enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'NONE']).default('MEDIUM'),
+    context_payload: planningContextInput.default({}),
     labels: z.array(z.string().max(30)).max(10).default([]),
+    project_id: z.string().min(1).optional(),
+    parent_task_id: z.string().min(1).nullable().optional(),
+    is_agent_task: z.boolean().default(false),
+    agent_key: z
+      .string()
+      .regex(/^[a-z][a-z0-9_-]{0,39}$/)
+      .nullable()
+      .optional(),
+  })
+  .refine((value) => (value.is_agent_task ? !!value.agent_key : !value.agent_key), {
+    message: 'agent_key is required only for agent tasks',
   })
   .strict();
 export async function POST(req: NextRequest) {
@@ -78,36 +90,56 @@ export async function POST(req: NextRequest) {
         const caller = signed
           ? w.actors.find((a) => a.type === 'HUMAN')!
           : authenticate(req, w, true);
+        const project =
+          w.projects.find((item) => item.id === body.project_id) ??
+          (!body.project_id
+            ? (w.projects.length === 1 ? w.projects[0] : undefined)
+            : undefined);
+        if (!project) throw new ProtocolError('Choose a project for this task', 422);
+        const parent = body.parent_task_id
+          ? w.tasks.find((task) => task.id === body.parent_task_id)
+          : undefined;
+        if (
+          body.parent_task_id &&
+          (!parent || parent.project_id !== project.id)
+        )
+          throw new ProtocolError('Subtasks must belong to a task in the same project', 422);
+        if (parent?.parent_task_id) {
+          const grandparent = w.tasks.find((task) => task.id === parent.parent_task_id);
+          if (!grandparent || grandparent.parent_task_id)
+            throw new ProtocolError('Tasks support three levels: task, subtask, and sub-subtask', 422);
+        }
         const existing = w.tasks.find(
-          (t) => t.source_type === body.source_type && t.source_ref === body.source_ref,
+          (t) =>
+            t.project_id === project.id &&
+            t.source_type === body.source_type &&
+            t.source_ref === body.source_ref,
         );
         if (existing) return { task: existing, duplicate: true };
         if (!caller)
           throw new ProtocolError('No human identity exists for this integration workspace', 403);
-        const triage = w.actors.find(
-          (actor) =>
-            actor.type === 'AGENT' && actor.handle === '@bot-triage' && actor.status !== 'OFFLINE',
-        );
         const now = new Date().toISOString();
         const task = {
           ...body,
+          project_id: project.id,
+          parent_task_id: body.parent_task_id ?? null,
+          agent_key: body.is_agent_task ? (body.agent_key ?? null) : null,
           id:
             w.next_task_id ??
             `NEX-${Math.max(104, ...w.tasks.map((t) => Number(t.id.split('-')[1]) || 0)) + 1}`,
-          state: 'TRIAGE' as const,
+          state: body.is_agent_task ? ('QUEUED' as const) : ('TRIAGE' as const),
           source_url: body.source_url ?? null,
-          assignee_id: triage?.id ?? null,
+          assignee_id: null,
           delegated_by_id: null,
           hop_count: 0,
           max_hops: 4,
           lock_token: null,
           confidence_score: null,
-          live_activity_text: triage ? 'Analyzing incoming task' : null,
+          live_activity_text: body.is_agent_task ? `Waiting for ${body.agent_key} worker` : null,
           created_at: now,
           updated_at: now,
         };
         w.tasks.push(task);
-        if (triage && triage.status !== 'OFFLINE') triage.status = 'EXECUTING';
         event(
           w,
           task,

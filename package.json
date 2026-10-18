@@ -13,9 +13,16 @@
     "db:import-local": "node --import tsx scripts/import-local.ts",
     "test:auth": "node --import tsx scripts/auth-smoke.ts",
     "test:isolation": "node --import tsx scripts/isolation-smoke.ts",
-    "test:workspaces": "node --import tsx scripts/workspace-smoke.ts"
+    "test:workspaces": "node --import tsx scripts/workspace-smoke.ts",
+    "test:planning": "node --import tsx scripts/planning-smoke.ts",
+    "test:attachments": "node --import tsx scripts/attachments-smoke.ts",
+    "test:notifications": "node --import tsx scripts/notifications-smoke.ts",
+    "test:agents": "node --import tsx scripts/agents-smoke.ts",
+    "test:developer": "node --import tsx scripts/developer-keys-smoke.ts"
   },
   "dependencies": {
+    "@next/env": "^15.5.28",
+    "@scalar/nextjs-api-reference": "^0.12.11",
     "@tailwindcss/postcss": "^4.1.13",
     "drizzle-orm": "^0.44.5",
     "framer-motion": "^12.23.0",
@@ -27,8 +34,7 @@
     "sonner": "^2.0.7",
     "tailwindcss": "^4.1.13",
     "zod": "^4.1.0",
-    "zustand": "^5.0.8",
-    "@next/env": "^15.5.28"
+    "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

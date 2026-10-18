@@ -45,23 +45,15 @@ async function main() {
     );
     console.log('PASS fresh registration is empty');
     const b = await register();
-    async function agent(cookie: string, handle: string) {
-      const response = await request(
-        '/api/v1/actors/agents',
-        'POST',
-        { handle, display_name: handle.slice(1), capabilities: ['testing'] },
-        cookie,
-      );
-      assert.equal(response.status, 200);
-      return response.json();
-    }
-    const coderA = await agent(a.cookie, '@bot-coder');
-    const qaA = await agent(a.cookie, '@bot-qa');
-    const coderB = await agent(b.cookie, '@bot-coder');
-    assert.notEqual(coderA.actor.id, coderB.actor.id);
-    console.log('PASS identical agent handles are independently registered per account');
+    const projectAResponse = await request('/api/v1/projects', 'POST', { name: 'Isolated project' }, a.cookie);
+    const projectBResponse = await request('/api/v1/projects', 'POST', { name: 'Isolated project' }, b.cookie);
+    assert.equal(projectAResponse.status, 200);
+    assert.equal(projectBResponse.status, 200);
+    const projectA = (await projectAResponse.json()).project;
+    const projectB = (await projectBResponse.json()).project;
+    console.log('PASS identical project names remain isolated per workspace');
     const sourceRef = `isolation-${randomBytes(6).toString('hex')}`;
-    const payload = { title: 'Owned isolation task', source_type: 'MANUAL', source_ref: sourceRef };
+    const payload = { title: 'Owned isolation task', source_type: 'MANUAL', source_ref: sourceRef, project_id: projectA.id };
     const createA = await request('/api/v1/ingest', 'POST', payload, a.cookie);
     assert.equal(createA.status, 200);
     const taskA = (await createA.json()).task;
@@ -71,7 +63,7 @@ async function main() {
     assert.equal(emptyB.events.length, 0);
     assert.equal(
       emptyB.actors.some(
-        (actor: { id: string }) => actor.id === coderA.actor.id || actor.id === a.actorId,
+        (actor: { id: string }) => actor.id === a.actorId,
       ),
       false,
     );
@@ -88,7 +80,7 @@ async function main() {
     );
     console.log('PASS cookie sessions cannot switch owners using a forged header');
 
-    const createB = await request('/api/v1/ingest', 'POST', payload, b.cookie);
+    const createB = await request('/api/v1/ingest', 'POST', { ...payload, project_id: projectB.id }, b.cookie);
     assert.equal(createB.status, 200);
     const taskB = (await createB.json()).task;
     assert.notEqual(taskA.id, taskB.id);
@@ -98,74 +90,19 @@ async function main() {
     console.log('PASS source deduplication and task IDs work independently across accounts');
     for (const [suffix, method, body] of [
       ['/events', 'POST', { message: 'Access probe' }],
-      ['/delegate', 'POST', { target_handle: '@bot-coder' }],
+      ['', 'PATCH', { action: 'set-priority', priority: 'HIGH' }],
+      ['', 'PATCH', { action: 'update-description', description: 'Denied' }],
+      ['', 'PATCH', { action: 'update-planning', completion: 50 }],
       ['/telemetry', 'PATCH', { confidence_score: 0.5 }],
       ['', 'PATCH', { action: 'queue' }],
     ] as const) {
       const denied = await request(`/api/v1/tasks/${taskA.id}${suffix}`, method, body, b.cookie);
       assert.equal(denied.status, 404, `${method} ${suffix} must not access another account`);
     }
-    assert.equal(
-      (await request(`/api/v1/actors/${coderA.actor.id}`, 'PATCH', { status: 'OFFLINE' }, b.cookie))
-        .status,
-      404,
-    );
-    assert.equal(
-      (
-        await request(
-          '/api/v1/actors/agents',
-          'POST',
-          {
-            handle: '@bot-foreign-child',
-            display_name: 'Foreign child',
-            parent_agent_id: qaA.actor.id,
-          },
-          b.cookie,
-        )
-      ).status,
-      404,
-    );
-    assert.equal(
-      (
-        await request(
-          `/api/v1/tasks/${taskB.id}/delegate`,
-          'POST',
-          { target_handle: '@bot-qa' },
-          b.cookie,
-        )
-      ).status,
-      404,
-    );
-    console.log(
-      'PASS foreign task mutations, actor updates, parent references and delegation are rejected',
-    );
-    const delegated = await request(
-      `/api/v1/tasks/${taskA.id}/delegate`,
-      'POST',
-      { target_handle: '@bot-coder' },
-      a.cookie,
-    );
-    assert.equal(delegated.status, 200);
-    const agentResponse = await fetch(base + '/api/v1/workspace', {
-      headers: { authorization: `Bearer ${coderA.token}` },
-    });
-    assert.equal(agentResponse.status, 200);
-    const agentWorkspace = await agentResponse.json();
-    assert.deepEqual(
-      agentWorkspace.tasks.map((task: { id: string }) => task.id),
-      [taskA.id],
-    );
-    assert.equal(
-      agentWorkspace.actors.some((actor: { id: string }) => actor.id === coderB.actor.id),
-      false,
-    );
-    const crossAgent = await fetch(base + `/api/v1/tasks/${taskA.id}/telemetry`, {
-      method: 'PATCH',
-      headers: { authorization: `Bearer ${coderB.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ confidence_score: 0.9 }),
-    });
-    assert.equal(crossAgent.status, 404);
-    console.log('PASS agent tokens remain scoped to their owner and assigned task');
+    assert.equal((await fetch(base + '/api/v1/workspace', { headers: { cookie: b.cookie, 'x-nexus-workspace': a.id } })).status, 403);
+    assert.equal((await request(`/api/v1/tasks/${taskA.id}/attachments`, 'GET', undefined, b.cookie)).status, 403);
+    assert.equal((await request('/api/v1/ingest', 'POST', payload, b.cookie)).status, 422);
+    console.log('PASS foreign task edits, workspace headers, attachments and project references are rejected');
     const comment = await request(
       `/api/v1/tasks/${taskA.id}/events`,
       'POST',

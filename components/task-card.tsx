@@ -1,8 +1,7 @@
 'use client';
-import type { Actor, Task } from '@/lib/types';
+import type { Task } from '@/lib/types';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ArrowRight,
   ArrowUpRight,
   Check,
   CircleDot,
@@ -10,17 +9,16 @@ import {
   GitPullRequest,
   MessageSquare,
   MoreHorizontal,
-  ShieldAlert,
+  ListTree,
   Sparkles,
   Ticket,
   Zap,
 } from 'lucide-react';
 import { useState } from 'react';
-import { Avatar, Button, CheckMark, PriorityIcon, RollingNumber } from './ui';
+import { Button, CheckMark, PriorityIcon } from './ui';
 const spring = { type: 'spring' as const, stiffness: 400, damping: 30 };
 export default function TaskCard({
   task,
-  actors,
   eventCount,
   onOpen,
   onApprove,
@@ -28,18 +26,14 @@ export default function TaskCard({
   compact = false,
 }: {
   task: Task;
-  actors: Actor[];
   eventCount: number;
   onOpen: () => void;
   onApprove: () => void;
   busy: boolean;
   compact?: boolean;
 }) {
-  const actor = actors.find((a) => a.id === task.assignee_id);
-  const from = actors.find((a) => a.id === task.delegated_by_id);
   const [approving, setApproving] = useState(false);
   const liveActivity = task.live_activity_text ?? 'Awaiting agent telemetry';
-  const circuit = task.hop_count >= task.max_hops;
   const Source =
     task.source_type === 'GITHUB_PR'
       ? GitPullRequest
@@ -52,9 +46,9 @@ export default function TaskCard({
       layoutId={task.id}
       transition={{ default: spring, layout: spring, x: { type: 'tween', duration: 0.38 } }}
       initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0, x: circuit ? [-4, 4, -4, 4, 0] : 0 }}
+      animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.97 }}
-      className={`task-card ${task.state === 'EXECUTING' ? 'executing' : ''} ${circuit ? 'circuit' : ''} ${approving ? 'approving' : ''} ${compact ? 'compact' : ''}`}
+      className={`task-card ${task.state === 'EXECUTING' ? 'executing' : ''} ${approving ? 'approving' : ''} ${compact ? 'compact' : ''}`}
     >
       <div
         className="card-main"
@@ -92,7 +86,7 @@ export default function TaskCard({
             <span>{task.context_payload.branch}</span>
           </div>
         )}
-        {task.state === 'WAITING_HUMAN' && !circuit && (
+        {task.state === 'WAITING_HUMAN' && (
           <div className="review-note">
             <Check size={13} />
             <span>Ready for human review</span>
@@ -101,50 +95,16 @@ export default function TaskCard({
             )}
           </div>
         )}
-        {circuit && (
-          <div className="circuit-note">
-            <ShieldAlert size={14} />
-            Delegation limit reached
-          </div>
-        )}
         <div className="card-footer">
-          <div className="actor-relay">
-            <AnimatePresence mode="popLayout">
-              {from && (
-                <motion.span
-                  key={from.id}
-                  initial={{ opacity: 0, scale: 0.8, x: 8 }}
-                  animate={{ opacity: 1, scale: 1, x: 0 }}
-                >
-                  <Avatar actor={from} size={22} />
-                </motion.span>
-              )}
-            </AnimatePresence>
-            {from && (
-              <motion.span initial={{ width: 0, opacity: 0 }} animate={{ width: 12, opacity: 1 }}>
-                <ArrowRight size={11} />
-              </motion.span>
-            )}
-            <motion.span
-              key={actor?.id}
-              initial={{ scale: 0.5, x: -6 }}
-              animate={{ scale: 1, x: 0 }}
-              transition={spring}
-            >
-              <Avatar actor={actor} size={24} />
-            </motion.span>
-            {!from && (
-              <span className="actor-handle">
-                {actor?.handle.replace('@bot-', '') ?? 'Unassigned'}
-              </span>
-            )}
-          </div>
+          <span className="task-worker-label">
+            {task.parent_task_id && <ListTree size={12} />}
+            {task.is_agent_task
+              ? `External worker · ${task.agent_key}`
+              : task.parent_task_id
+                ? 'Subtask'
+                : 'Human task'}
+          </span>
           <div className="card-meta">
-            <span className={`hop-badge ${circuit ? 'hop-warning' : ''}`} title="Delegation hops">
-              <GitBranch size={11} />
-              <RollingNumber value={task.hop_count} />
-              <span>/{task.max_hops}</span>
-            </span>
             <span className="comment-count">
               <MessageSquare size={12} />
               {eventCount}
@@ -178,7 +138,7 @@ export default function TaskCard({
       {task.state === 'WAITING_HUMAN' && (
         <div className="approval-area">
           <Button
-            className={circuit ? 'warning-button' : 'approve-button'}
+            className="approve-button"
             disabled={busy || approving}
             onClick={() => {
               setApproving(true);
@@ -188,8 +148,8 @@ export default function TaskCard({
               }, 450);
             }}
           >
-            {approving ? <CheckMark /> : circuit ? <ShieldAlert size={13} /> : <Check size={13} />}{' '}
-            {circuit ? 'Review & resolve' : approving ? 'Approved' : 'Approve & merge'}
+            {approving ? <CheckMark /> : <Check size={13} />}{' '}
+            {approving ? 'Approved' : 'Approve & complete'}
             <ArrowUpRight size={12} />
           </Button>
         </div>

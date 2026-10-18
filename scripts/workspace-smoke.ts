@@ -136,12 +136,17 @@ async function main() {
     pass(
       'in-app invitations require matching email and explicit acceptance, and cannot be replayed',
     );
+    const project = await request(b.cookie, '/projects', 'POST', { name: 'Shared QA project' }, id);
+    assert.equal(project.status, 200, JSON.stringify(project.data));
     const payload = {
+      project_id: project.data.project.id,
       title: 'Shared engineering task',
       source_type: 'MANUAL',
       source_ref: 'shared-qa',
     };
-    const task = (await request(b.cookie, '/ingest', 'POST', payload, id)).data.task;
+    const createdTask = await request(b.cookie, '/ingest', 'POST', payload, id);
+    assert.equal(createdTask.status, 200, JSON.stringify(createdTask.data));
+    const task = createdTask.data.task;
     assert.ok(task.id);
     const board = (await request(a.cookie, '/workspace', 'GET', undefined, id)).data;
     assert.equal(board.tasks[0].id, task.id);
@@ -183,18 +188,6 @@ async function main() {
       );
     assert.equal(
       (
-        await request(
-          b.cookie,
-          '/actors/agents',
-          'POST',
-          { handle: '@qa-agent', display_name: 'QA agent' },
-          id,
-        )
-      ).status,
-      403,
-    );
-    assert.equal(
-      (
         await request(a.cookie, '/workspaces', 'POST', {
           action: 'role',
           workspace_id: id,
@@ -215,26 +208,6 @@ async function main() {
       409,
     );
     pass('member privileges are enforced by the server and last admin is protected');
-    const registeredAgent = await request(
-      a.cookie,
-      '/actors/agents',
-      'POST',
-      { handle: '@qa-agent', display_name: 'QA agent' },
-      id,
-    );
-    assert.equal(registeredAgent.status, 200, JSON.stringify(registeredAgent.data));
-    assert.equal(
-      (
-        await request(
-          b.cookie,
-          `/actors/${registeredAgent.data.actor.id}`,
-          'PATCH',
-          { status: 'OFFLINE' },
-          id,
-        )
-      ).status,
-      403,
-    );
     assert.equal(
       (
         await request(a.cookie, '/workspaces', 'POST', {
@@ -256,7 +229,7 @@ async function main() {
       ).status,
       200,
     );
-    pass('admin can register agents and promote members to admin');
+    pass('admin can promote members and promoted admins can rename the workspace');
     assert.equal(
       (
         await request(b.cookie, '/workspaces', 'POST', {
@@ -393,6 +366,33 @@ async function main() {
       422,
     );
     pass('in-app invitations require an existing registered recipient');
+    for (const name of ['', ' ', 'x', 'x'.repeat(81)]) assert.equal((await request(a.cookie, '/workspaces', 'POST', { action: 'create', name })).status, 422);
+    assert.equal((await request('', '/workspaces')).status, 401);
+    assert.equal((await request(a.cookie, '/workspaces', 'POST', { action: 'invite', workspace_id: id, email: a.email, role: 'member' })).status, 409);
+    assert.equal((await request(a.cookie, '/workspaces', 'POST', { action: 'invite', workspace_id: id, email: b.email, role: 'owner' })).status, 422);
+    pass('empty, oversized and invalid inputs, self-invites, and unauthenticated access are rejected');
+    const inviteB = () => request(a.cookie, '/workspaces', 'POST', { action: 'invite', workspace_id: id, email: b.email, role: 'member' });
+    assert.equal((await inviteB()).status, 200);
+    let invitation = (await request(b.cookie, '/workspaces')).data.invitations.find((entry: { workspace_id: string }) => entry.workspace_id === id);
+    assert.equal((await request(b.cookie, '/workspaces', 'POST', { action: 'respond', invitation_id: invitation.id, accept: false })).status, 200);
+    assert.equal((await request(b.cookie, '/workspaces')).data.invitations.length, 0);
+    assert.equal((await request(b.cookie, '/workspace', 'GET', undefined, id)).status, 403);
+    assert.equal((await request(b.cookie, '/workspaces', 'POST', { action: 'respond', invitation_id: invitation.id, accept: true })).status, 404);
+    pass('declining clears the invitation and never grants workspace access');
+    const duplicates = await Promise.all([inviteB(), inviteB()]);
+    assert.deepEqual(duplicates.map((result) => result.status).sort(), [200, 409]);
+    invitation = (await request(b.cookie, '/workspaces')).data.invitations.find((entry: { workspace_id: string }) => entry.workspace_id === id);
+    const accepts = await Promise.all(Array.from({ length: 2 }, () => request(b.cookie, '/workspaces', 'POST', { action: 'respond', invitation_id: invitation.id, accept: true })));
+    assert.deepEqual(accepts.map((result) => result.status).sort(), [200, 404]);
+    assert.equal((await request(a.cookie, '/workspaces', 'GET', undefined, id)).data.members.filter((entry: { user_id: string }) => entry.user_id === b.id).length, 1);
+    pass('concurrent invites and accepts cannot duplicate pending invitations or memberships');
+    const lastAdmins = await Promise.all([
+      request(a.cookie, '/workspaces', 'POST', { action: 'role', workspace_id: id, user_id: a.id, role: 'member' }),
+      request(c.cookie, '/workspaces', 'POST', { action: 'role', workspace_id: id, user_id: c.id, role: 'member' }),
+    ]);
+    assert.deepEqual(lastAdmins.map((result) => result.status).sort(), [200, 409]);
+    assert.equal((await request(c.cookie, '/workspaces', 'GET', undefined, id)).data.members.filter((entry: { role: string }) => entry.role === 'admin').length, 1);
+    pass('concurrent admin demotions preserve at least one admin');
     const deniedCsrf = await fetch(base + '/api/v1/workspaces', {
       method: 'POST',
       headers: {

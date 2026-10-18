@@ -15,7 +15,15 @@ const file = path.join(
 );
 async function localRead(): Promise<Workspace> {
   try {
-    return JSON.parse(await readFile(file, 'utf8')) as Workspace;
+    const workspace = JSON.parse(await readFile(file, 'utf8')) as Workspace;
+    workspace.projects ??= [];
+    for (const task of workspace.tasks) {
+      task.project_id ??= workspace.projects[0]?.id ?? null;
+      task.parent_task_id ??= null;
+      task.is_agent_task ??= false;
+      task.agent_key ??= null;
+    }
+    return workspace;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     return seedWorkspace();
@@ -62,7 +70,7 @@ export async function transact<T>(
               )
               .where(eq(schema.workspaceMembers.workspace_id, ownerId))
           : undefined;
-        const [actors, tasks, events] = await Promise.all([
+        const [actors, tasks, events, projects] = await Promise.all([
           tx
             .select()
             .from(schema.actors)
@@ -88,11 +96,20 @@ export async function transact<T>(
                 ? eq(schema.taskEvents.workspace_id, ownerId)
                 : isNull(schema.taskEvents.workspace_id),
             ),
+          ownerId
+            ? tx.select().from(schema.projects).where(eq(schema.projects.workspace_id, ownerId))
+            : Promise.resolve([]),
         ]);
         const [sequence] = await tx.execute<{ next: number }>(
           schemaSQL`SELECT COALESCE(MAX(CASE WHEN id ~ '^NEX-[0-9]+$' THEN substring(id from 5)::integer END), 100) + 1 AS next FROM tasks`,
         );
-        const state = { actors, tasks, events, next_task_id: `NEX-${sequence.next}` } as Workspace;
+        const state = {
+          actors,
+          tasks,
+          events,
+          projects,
+          next_task_id: `NEX-${sequence.next}`,
+        } as Workspace;
         const result = await fn(state);
         for (const a of state.actors) {
           if (ownerId && a.type === 'HUMAN') continue;
@@ -110,7 +127,12 @@ export async function transact<T>(
         for (const t of state.tasks)
           await tx
             .insert(schema.tasks)
-            .values({ ...t, owner_user_id: workspace?.created_by ?? null, workspace_id: ownerId })
+            .values({
+              ...t,
+              project_id: ownerId ? t.project_id : null,
+              owner_user_id: workspace?.created_by ?? null,
+              workspace_id: ownerId,
+            })
             .onConflictDoUpdate({
               target: schema.tasks.id,
               set: { ...t, workspace_id: ownerId },
@@ -118,6 +140,16 @@ export async function transact<T>(
                 ? eq(schema.tasks.workspace_id, ownerId)
                 : isNull(schema.tasks.workspace_id),
             });
+        if (ownerId)
+          for (const project of state.projects)
+            await tx
+              .insert(schema.projects)
+              .values({ ...project, workspace_id: ownerId })
+              .onConflictDoUpdate({
+                target: schema.projects.id,
+                set: { ...project },
+                setWhere: eq(schema.projects.workspace_id, ownerId),
+              });
         for (const e of state.events)
           await tx
             .insert(schema.taskEvents)
