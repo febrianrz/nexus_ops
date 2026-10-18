@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "functions": {
+    "/api/v1/tasks/[id]/attachments/[attachmentId]": {},
+    "/api/v1/tasks/[id]/attachments": {},
+    "/api/profile": {}
+  }
+}
